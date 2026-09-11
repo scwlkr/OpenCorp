@@ -1,0 +1,61 @@
+{
+  "repository": "https://github.com/msitarzewski/agency-agents",
+  "commit": "6d29a9b08785a0e49ffc9818bbdd381164c2df5f",
+  "files": [
+    {
+      "upstreamPath": "product/product-manager.md",
+      "localFile": "product-manager.md",
+      "sha256": "4a3fe4661e72e5173877bcba7c362392181774b20efc27ac1789171e98676c9d"
+    },
+    {
+      "upstreamPath": "product/product-sprint-prioritizer.md",
+      "localFile": "product-sprint-prioritizer.md",
+      "sha256": "da5233770ca85a3931b72d80b37dd09616a54fd24075c607667853acf65b000a"
+    },
+    {
+      "upstreamPath": "engineering/engineering-senior-developer.md",
+      "localFile": "engineering-senior-developer.md",
+      "sha256": "63b8da6c12b95f54bbdbcd0666abeb9519a98b35395233e1b1d8e5c102c82599"
+    },
+    {
+      "upstreamPath": "engineering/engineering-software-architect.md",
+      "localFile": "engineering-software-architect.md",
+      "sha256": "b85121691776147bacde26673e68fbbacd6a7f0816d1ca8e203c264d25ce1d30"
+    },
+    {
+      "upstreamPath": "engineering/engineering-code-reviewer.md",
+      "localFile": "engineering-code-reviewer.md",
+      "sha256": "7509fcc3ea1dda46511b2801996305bf3d4a125576f9655ff0b63df25602f446"
+    },
+    {
+      "upstreamPath": "design/design-ui-designer.md",
+      "localFile": "design-ui-designer.md",
+      "sha256": "3130768958d3b3d38178aaec91cf789e01ecca4984c8674d4aaea446b6cba240"
+    },
+    {
+      "upstreamPath": "testing/testing-api-tester.md",
+      "localFile": "testing-api-tester.md",
+      "sha256": "c89d7ae592523f4799426a8b09700ec4b9d99bf2fcae2d1b0dd2900d5f770127"
+    },
+    {
+      "upstreamPath": "testing/testing-reality-checker.md",
+      "localFile": "testing-reality-checker.md",
+      "sha256": "6d32fcdb114233e13902ec6372d50293b120e85d490b5e81d372c29808f988a1"
+    },
+    {
+      "upstreamPath": "project-management/project-management-studio-operations.md",
+      "localFile": "project-management-studio-operations.md",
+      "sha256": "8a2e5098d94688d191a128b6b2fdbbf3724bfcd2f4944766de6e25a0709f1517"
+    },
+    {
+      "upstreamPath": "support/support-support-responder.md",
+      "localFile": "support-support-responder.md",
+      "sha256": "4dcd962743e940d1cdd119dcc748d4a434b6b32775aa11ea68fbd2209ee0852c"
+    },
+    {
+      "upstreamPath": "support/support-executive-summary-generator.md",
+      "localFile": "support-executive-summary-generator.md",
+      "sha256": "298891fcf297de5d9b343e9ab9b63864317de63256b15c0c72e6cec172f8f0ff"
+    }
+  ]
+}

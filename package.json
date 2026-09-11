@@ -1,0 +1,67 @@
+{
+  "name": "opencorp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.20.0"
+  },
+  "bin": {
+    "opencorp": "bin/opencorp"
+  },
+  "scripts": {
+    "dev": "tsx src/server/main.ts",
+    "start": "node dist/server/main.js",
+    "build": "tsc -p tsconfig.build.json && vite build && node scripts/check-built-surfaces.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests scripts --max-warnings=0",
+    "test": "vitest run",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build",
+    "verify:local-runtime": "tsx scripts/verify-local-runtime.ts",
+    "verify:acceptance": "tsx scripts/verify-acceptance.ts",
+    "verify:corporate-runtime": "tsx scripts/verify-corporate-runtime.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.75",
+    "@hono/node-server": "2.1.1",
+    "@hono/zod-openapi": "1.6.3",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@opencode-ai/sdk": "1.18.30",
+    "@playwright/mcp": "0.0.80",
+    "@steipete/macos-automator-mcp": "0.4.7",
+    "better-sqlite3": "13.0.3",
+    "commander": "15.0.0",
+    "hono": "4.13.7",
+    "ink": "7.1.1",
+    "opencode-ai": "1.18.30",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "yaml": "2.9.0",
+    "zod": "4.6.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@playwright/test": "1.63.0",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "22.20.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "eslint": "9.39.5",
+    "tsx": "4.23.13",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.0",
+    "vite": "8.3.0",
+    "vitest": "5.0.0"
+  },
+  "description": "A persistent AI company powered by local models, scoped authority, and reviewed software delivery.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scwlkr/OpenCorp.git"
+  },
+  "homepage": "https://github.com/scwlkr/OpenCorp#readme",
+  "bugs": {
+    "url": "https://github.com/scwlkr/OpenCorp/issues"
+  }
+}

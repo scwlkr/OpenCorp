@@ -1,0 +1,5 @@
+* text=auto
+# Markdown uses trailing spaces for explicit line breaks.
+*.md whitespace=-blank-at-eol
+# Keep vendored content byte-for-byte consistent with its provenance hashes.
+skills/vendor/** -text -whitespace

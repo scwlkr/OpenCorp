@@ -1,0 +1,19 @@
+#!/bin/bash
+set -eu
+script_path="${BASH_SOURCE[0]}"
+while [ -L "$script_path" ]; do
+  script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
+  script_path="$(readlink "$script_path")"
+  case "$script_path" in /*) ;; *) script_path="$script_dir/$script_path" ;; esac
+done
+app_root="$(cd -P "$(dirname "$script_path")/.." && pwd)"
+node_bin="$HOME/.local/share/mise/installs/node/24.20.0/bin/node"
+if [ ! -x "$node_bin" ]; then
+  echo 'OpenCorp requires Node 24.20.0 installed through mise.' >&2
+  exit 1
+fi
+if [ ! -f "$app_root/dist/cli/index.js" ]; then
+  echo 'OpenCorp has not been built. Run mise exec node@24.20.0 -- npm run build in the OpenCorp directory.' >&2
+  exit 1
+fi
+exec "$node_bin" "$app_root/dist/cli/index.js" "$@"
