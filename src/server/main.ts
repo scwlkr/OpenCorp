@@ -1,3 +1,4 @@
+import { telegramConfig, TelegramTransport } from './telegram.js';
 import { pruneInspections } from '../runtime/inspection.js';
 import { createFreePool } from './free-pool-config.js';
 import { directFreeConfig } from './direct-free-config.js';
@@ -35,7 +36,9 @@ const address=server.address();if(!address||typeof address==='string')throw new 
 writePrivate(join(dataRoot,'discovery.json'),JSON.stringify({url,pid:process.pid,startedAt:new Date().toISOString()},null,2));
 process.stdout.write(`OpenCorp ${url} (${store.company.state})\n`);
 await scheduler.recover();if(store.company.state==='running')scheduler.start();
+let telegram:TelegramTransport|undefined;
+try{const config=telegramConfig(dataRoot);if(config){telegram=new TelegramTransport(store,config);telegram.start();}}catch{store.emit('telegram.unavailable',{detail:'Check private Telegram configuration and retained integration identity.'});}
 const maintain=setInterval(()=>{try{pruneInspections(dataRoot);store.vault.scan();if(store.company.expansion)void notifyOwnerRequests(store).catch(error=>{if(store.db.open)store.emit('maintenance.error',{error:redact(String(error))});});for(const name of ['daemon.log','service.log']){const path=join(dataRoot,'logs',name);if(existsSync(path)&&statSync(path).size>10_000_000){copyFileSync(path,`${path}.1`);truncateSync(path,0);}}}catch(error){store.emit('maintenance.error',{error:redact(String(error))});}},30_000);maintain.unref();
-let ending=false;async function shutdown(){if(ending)return;ending=true;clearInterval(maintain);const deadline=setTimeout(()=>process.exit(1),7000);deadline.unref();try{await scheduler.shutdown();if('closeAllConnections' in server)server.closeAllConnections();if('closeAllConnections' in worker)worker.closeAllConnections();server.close();worker.close();freePool.state.close();store.close();if(existsSync(lockPath)&&JSON.parse(readFileSync(lockPath,'utf8')).pid===process.pid)unlinkSync(lockPath);}finally{clearTimeout(deadline);process.exit(0);}}
+let ending=false;async function shutdown(){if(ending)return;ending=true;clearInterval(maintain);const deadline=setTimeout(()=>process.exit(1),7000);deadline.unref();try{await telegram?.stop();await scheduler.shutdown();if('closeAllConnections' in server)server.closeAllConnections();if('closeAllConnections' in worker)worker.closeAllConnections();server.close();worker.close();freePool.state.close();store.close();if(existsSync(lockPath)&&JSON.parse(readFileSync(lockPath,'utf8')).pid===process.pid)unlinkSync(lockPath);}finally{clearTimeout(deadline);process.exit(0);}}
 process.on('SIGTERM',()=>void shutdown());process.on('SIGINT',()=>void shutdown());
 process.on('unhandledRejection',error=>{process.stderr.write(`${redact(String(error))}\n`);void shutdown();});

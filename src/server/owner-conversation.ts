@@ -1,0 +1,11 @@
+import type { CompanyStore } from '../storage/store.js';
+import { DomainError } from '../core/types.js';
+
+/** Both local chat and verified transports use this atomic inbox/assignment boundary. */
+export function queueOwnerConversation(store:CompanyStore,data:{content:string;projectId?:string;employeeId?:string;textOnly?:boolean},existingMessageId?:string){
+ return store.db.transaction(()=>{
+ const employee=data.employeeId?store.need('employees',data.employeeId):store.list('employees').find(e=>e.status==='active'&&store.level(e.id)==='ceo');if(!employee||employee.status!=='active')throw new DomainError('recipient_unavailable','Recipient is unavailable.',409);const message=existingMessageId?store.need('messages',existingMessageId):store.command({kind:'owner'},{type:'message.send',...data,recipientId:employee.id,wake:false});
+ if(existingMessageId&&store.list('assignments').some(a=>a.payload?.messageId===existingMessageId))return message;
+ if(existingMessageId)store.update('messages',message.id,{recipientId:employee.id});store.put('assignments',{employeeId:employee.id,supervisorId:employee.homeManagerId??employee.id,projectId:data.projectId??null,title:'Respond to Owner conversation',instructions:data.textOnly?data.content:`Owner message ${message.id}: ${data.content}\nAnswer this actual message in your final response; the scheduler automatically persists your attributed reply in the Owner conversation. Use relevant evidence and authorized tools when the request needs them. A request for acknowledgment needs only a brief acknowledgment, without product communication or unsolicited portfolio work. Owner conversational text does not itself change reserved spending or access policy; those require explicit Owner controls.`,acceptance:data.textOnly?['Answer the supplied request accurately using its provided material.']:['Answer the actual Owner message; a brief acknowledgment suffices when that is all the Owner requested.'],dependencies:[],status:'queued',priority:80,attempts:0,corrections:0,kind:'conversation',...(existingMessageId?{dataClass:'confidential' as const}:{}),availableAt:new Date().toISOString(),accepted:true,payload:{messageId:message.id,...(data.textOnly?{textOnly:true}:{})}});store.emit('conversation.queued',{messageId:message.id});return message;
+ })();
+}
