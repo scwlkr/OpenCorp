@@ -481,7 +481,7 @@ export class LocalRuntime {
     } finally {
       stopWatchdog(); turnSignal.removeEventListener('abort', abort);
       await localTestProxy?.close(); await gateway.close();
-      await stopOwned(child).catch(error => { throw new RuntimeExecutionError('runtime_failed', `Owned process absence unconfirmed: ${String(error)}`, diagnosticResult, { cause: error, evidence: failureEvidence }); });
+      await stopOwned(child).catch(error => { throw new RuntimeExecutionError('runtime_cleanup_uncertain', `Owned process absence unconfirmed: ${String(error)}`, diagnosticResult, { cause: error, evidence: failureEvidence }); });
       await writeFile(join(workerRoot, 'process.log'), output, { mode: 0o600 });
     }
   }

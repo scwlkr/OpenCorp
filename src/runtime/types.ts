@@ -128,7 +128,7 @@ export interface RuntimeResult {
   completion: { finishReason: string | null; continuations: number; outputLimit: 4096 | 1024; exhausted: boolean; nativeStepLimit?: NativeStepLimit; finalResponse?: FinalResponseReceipt };
 }
 
-export type RuntimeFailureCode = 'output_limit_exhausted' | 'run_budget_exhausted' | 'step_budget_exhausted' | 'runtime_failed' | 'checkpoint_superseded' | 'provider_capacity_wait';
+export type RuntimeFailureCode = 'runtime_cleanup_uncertain' | 'output_limit_exhausted' | 'run_budget_exhausted' | 'step_budget_exhausted' | 'runtime_failed' | 'checkpoint_superseded' | 'provider_capacity_wait';
 export interface RuntimeFailureEvidence {
   runId: string; sessionId?: string; modelId: string; artifactIdentity: string; inferenceProfile?: LocalInferenceProfile;
   usage: RuntimeResult['usage']; diagnosticsPath: string;

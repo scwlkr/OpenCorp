@@ -56,3 +56,30 @@ it('keeps private run inspection Owner-only and never reads a runtime-supplied a
  expect((await request(`${path}/preserve`,{method:'POST'})).status).toBe(200);
  expect((await(await request(path)).json()).selected).toBe(true);
 });
+
+
+it('retains an individual pause through recovery and refuses resumption before effect reconciliation',async()=>{
+ const {store,request}=setup(),owner={kind:'owner'} as const;
+ const employee=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
+ store.put('models',{id:employee.modelId,name:employee.modelId,artifactIdentity:'local-fixture',local:true,available:true,capabilities:['tools']});
+ store.command(owner,{type:'control',action:'start'});
+ const task=store.command(owner,{type:'assignment.create',employeeId:employee.id,title:'Preserve useful work',instructions:'Inspect retained work',acceptance:['Report findings'],kind:'assessment'});
+ const run=store.claimNext({assignmentId:task.id,workspace:'/synthetic/preserved-work'})!;
+ const command=(data:object,authorized=true)=>request('/api/v1/command',{method:'POST',headers:{'content-type':'application/json',...(authorized?{}:{authorization:''})},body:JSON.stringify({type:'assignment.update',assignmentId:task.id,...data})});
+ expect((await command({paused:true,rationale:'Inspect interruption'},false)).status).toBe(401);
+ expect((await command({paused:true,rationale:'Inspect interruption'})).status).toBe(200);
+ expect(store.need('runs',run.id).tokenRevoked).toBe(true);
+ expect((await command({paused:false,rationale:'Too early'})).status).toBe(409);
+ store.recoverRuns(()=> 'absent');
+ expect(store.claimNext({assignmentId:task.id})).toBeUndefined();
+ const action=store.put('actions',{runId:run.id,employeeId:employee.id,productId:store.list('products')[0].id,kind:'communication',target:'synthetic',content:{},dedupeKey:'synthetic-intervention',status:'uncertain',cost:0,costEvidence:'synthetic',policyRevision:store.policy.revision});
+ expect((await command({paused:false,rationale:'Uncertain effect remains'})).status).toBe(409);
+ store.reconcileAction(action.id,{state:'present',evidence:'Synthetic provider observation',remoteRef:'synthetic-receipt'});
+ expect((await command({guidance:'Report the remaining limitation only.',rationale:'Narrow the next response'})).status).toBe(200);
+ expect((await command({paused:false,rationale:'Runtime absent and effect confirmed'})).status).toBe(200);
+ const next=store.claimNext({assignmentId:task.id})!;
+ expect(next.employeeId).toBe(employee.id);expect(next.workspace).toBe(run.workspace);
+ expect(store.need('assignments',task.id).instructions).toContain('Report the remaining limitation only.');
+ expect(store.need('actions',action.id).status).toBe('succeeded');
+ expect(()=>store.dispatchAction({kind:'employee',employeeId:employee.id,runId:run.id,policyRevision:store.policy.revision},action.id)).toThrow();
+});
