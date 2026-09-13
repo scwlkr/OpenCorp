@@ -160,7 +160,7 @@ describe('durable claims and external effects',()=>{
   });
   it('requires actual runtime observation before restart reclaim; uncertain work blocks',()=>{
     const work=assignment();const run=store.claimNext()!;store.recoverRuns();expect(store.need('runs',run.id).status).toBe('uncertain');expect(store.need('assignments',work.id).status).toBe('blocked');
-    store.command(owner,{type:'assignment.update',assignmentId:work.id,status:'queued',rationale:'Supervisor verified runtime absent and retained workspace'});const next=store.claimNext()!;store.recoverRuns(()=> 'absent');expect(store.need('runs',next.id).status).toBe('interrupted');expect(store.need('assignments',work.id).status).toBe('queued');
+    store.recoverRuns(()=> 'absent');store.command(owner,{type:'assignment.update',assignmentId:work.id,status:'queued',rationale:'Supervisor verified runtime absent and retained workspace'});const next=store.claimNext()!;store.recoverRuns(()=> 'absent');expect(store.need('runs',next.id).status).toBe('interrupted');expect(store.need('assignments',work.id).status).toBe('queued');
   });
   it('bounds transient retries and never silently completes repeated faults',()=>{
     const work=assignment();let run=store.claimNext()!;store.finishRun(run.id,{status:'failed',transient:true,error:'temporary local connection reset'});expect(store.need('assignments',work.id).status).toBe('queued');

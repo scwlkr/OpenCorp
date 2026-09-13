@@ -949,3 +949,21 @@ it.each(['none','corporate','dependency','delivery','pullRequest','cleanup','rev
  if(effect==='none'){expect(ended.status).toBe('interrupted');expect(actual).toMatchObject({status:'queued',availableAt:retryAt,resourceWait:{provider:'free-pool',retryAt}});expect(diagnose).not.toHaveBeenCalled();}
  else expect(actual.resourceWait).toBeUndefined();
 });
+
+
+it('keeps an interrupted assignment quarantined when native process cleanup is unconfirmed',async()=>{
+ store.update('assignments',assignment.id,{status:'running'});
+ const runtime={cancel:vi.fn(async()=>{}),execute:vi.fn(async()=>{
+  store.command(owner,{type:'assignment.update',assignmentId:assignment.id,paused:true,rationale:'Inspect stalled work'});
+  throw new RuntimeExecutionError('runtime_cleanup_uncertain','Owned process absence unconfirmed');
+ })} as unknown as LocalRuntime;
+ const scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://broker.invalid');
+ await (scheduler as any).execute(run);
+ expect(store.need('runs',run.id).status).toBe('uncertain');
+ expect(()=>store.command(owner,{type:'assignment.update',assignmentId:assignment.id,paused:false,rationale:'Attempt early resume'})).toThrow(/reconcil|runtime/);
+ store.command(owner,{type:'assignment.update',assignmentId:assignment.id,status:'queued',rationale:'A rationale alone cannot confirm process absence'});
+ expect(store.claimNext({assignmentId:assignment.id})).toBeUndefined();
+ store.recoverRuns(()=> 'absent');
+ store.command(owner,{type:'assignment.update',assignmentId:assignment.id,paused:false,rationale:'Native ownership positively reconciled'});
+ const next=store.claimNext({assignmentId:assignment.id});expect(next?.employeeId).toBe(run.employeeId);expect(next?.workspace).toBe(run.workspace);expect(store.need('assignments',assignment.id).resumeRunId).toBe(run.id);
+});

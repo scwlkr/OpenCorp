@@ -612,6 +612,24 @@ export class CompanyStore {
     if(assignment.directionReview&&c.status==='queued')throw new DomainError('obsolete_assignment','Retain or cancel this obsolete administrative assignment with a reason; create useful replacement work under the current mandate',409);
     if(Object.hasOwn(c,'projectId')||Object.hasOwn(c,'payload'))throw new DomainError('immutable_assignment_scope','assignment.update does not support projectId or payload changes. Supervising management can cancel the old assignment with a reason and create a new correctly scoped assignment; retained history and acceptance are not rebound.');
     const patch: any={};
+    if(c.paused!==undefined||c.guidance!==undefined){
+      if(['completed','cancelled'].includes(assignment.status))throw new DomainError('closed_assignment','Completed or cancelled work cannot be intervened in',409);
+      const rationale=required(c.rationale,'Intervention rationale');
+      if(c.paused!==undefined){
+        if(typeof c.paused!=='boolean')throw new DomainError('invalid_input','paused must be boolean');
+        if(!c.paused&&this.list('runs').some(run=>run.assignmentId===assignment.id&&(!TERMINAL.has(run.status)||run.status==='uncertain')))throw new DomainError('reconciliation_required','Wait for the previous runtime to stop and reconcile uncertain ownership before resuming',409);
+        if(!c.paused&&this.pendingAssignmentEffects(assignment.id).length)throw new DomainError('reconciliation_required','Reconcile dispatched or uncertain effects before resuming',409);
+        patch.paused=c.paused;
+        if(c.paused)for(const run of this.list('runs').filter(run=>run.assignmentId===assignment.id&&!TERMINAL.has(run.status)))this.revokeRun(run.id,'Individual assignment pause');
+      }
+      if(c.guidance!==undefined){
+        if(c.instructions!==undefined)throw new DomainError('invalid_input','Supply guidance or replacement instructions, not both');
+        const guidance=required(c.guidance,'Guidance');
+        if(guidance.length>20000)throw new DomainError('invalid_input','Guidance exceeds 20000 characters');
+        patch.instructions=`Subsequent-attempt guidance (${actor.kind==='owner'?'Owner':actor.employeeId}; supersedes conflicting earlier instructions within existing acceptance and authority):\n${guidance}\n\n${assignment.instructions}`;
+      }
+      patch.intervention={at:NOW(),actorId:actor.kind==='owner'?'owner':actor.employeeId,rationale,...(c.paused!==undefined?{paused:c.paused}:{}),...(c.guidance!==undefined?{guidance:c.guidance}:{})};
+    }
     if(c.completionRequirements!==undefined||c.completionEvidence!==undefined||c.status==='completed')this.requireLevel(actor,['ceo','executive','lead','manager']);
     if(c.completionRequirements!==undefined){
       if(assignment.kind!=='implementation')throw new DomainError('invalid_completion_requirements','Only implementation assignments have artifact completion requirements');
@@ -919,13 +937,14 @@ export class CompanyStore {
     this.emit('inference.provider_cooldown',value);
   }
   modelDispatchAllowed(modelId:string):boolean { const cooldown=this.providerBackoff();return !validOpenRouterFreeId(modelId)||!cooldown||Date.parse(cooldown.retryAt)<=Date.now(); }
+  pendingAssignmentEffects(assignmentId:string) { const runs=new Set(this.list('runs').filter(run=>run.assignmentId===assignmentId).map(run=>run.id));return this.list('actions').filter(action=>runs.has(action.runId)&&['dispatched','uncertain'].includes(action.status)); }
   claimNext(options: {workspace?: string; leaseMs?: number; assignmentId?: string} = {}): EmployeeRun | undefined {
     return this.db.transaction(() => {
       if (this.company.state!=='running') return undefined;
       this.reconcileReviewScopes();
       if (this.list('runs').filter(r=>r.status==='running'||r.status==='cancelling').length>=this.policy.maxInference) return undefined;
       const assignments=this.list('assignments');
-      const ready=assignments.filter(a=>a.status==='queued'&&a.accepted!==false&&a.availableAt<=NOW()&&(!options.assignmentId||a.id===options.assignmentId)&&this.modelDispatchAllowed(a.kind==='social'&&a.payload?.modelId?a.payload.modelId:this.need('employees',a.employeeId).modelId)&&!this.reviewScopeIssue(a)&&this.reviewScopeCorrectionAllowed(a)&&(!a.projectId||this.need('projects',a.projectId).status==='active'&&projectDispatchAllowed(this.need('projects',a.projectId),a))&&(a.kind!=='social'||socialDispatchAllowed(this,a.id))&&this.need('employees',a.employeeId).status==='active'&&a.dependencies.every(id=>{const dependency=this.get('assignments',id);return !!dependency&&this.assignmentCompleted(dependency);}));
+      const ready=assignments.filter(a=>a.status==='queued'&&!a.paused&&!this.list('runs').some(run=>run.assignmentId===a.id&&run.status==='uncertain')&&!this.pendingAssignmentEffects(a.id).length&&a.accepted!==false&&a.availableAt<=NOW()&&(!options.assignmentId||a.id===options.assignmentId)&&this.modelDispatchAllowed(a.kind==='social'&&a.payload?.modelId?a.payload.modelId:this.need('employees',a.employeeId).modelId)&&!this.reviewScopeIssue(a)&&this.reviewScopeCorrectionAllowed(a)&&(!a.projectId||this.need('projects',a.projectId).status==='active'&&projectDispatchAllowed(this.need('projects',a.projectId),a))&&(a.kind!=='social'||socialDispatchAllowed(this,a.id))&&this.need('employees',a.employeeId).status==='active'&&a.dependencies.every(id=>{const dependency=this.get('assignments',id);return !!dependency&&this.assignmentCompleted(dependency);}));
       ready.sort((a,b)=>(b.priority+Math.floor((Date.now()-Date.parse(b.createdAt))/3_600_000))-(a.priority+Math.floor((Date.now()-Date.parse(a.createdAt))/3_600_000))||a.createdAt.localeCompare(b.createdAt));
       const assignment=ready[0]; if (!assignment) return undefined;
       const employee=this.need('employees',assignment.employeeId);
@@ -941,7 +960,7 @@ export class CompanyStore {
       const sharing=assignment.kind!=='social'&&qualification?.passed&&qualification?.evidence&&productiveSharingAllowed(selected(modelId),productive.map(r=>selected(r.modelId)),{maxProductiveTurns:this.policy.maxProductiveTurns,productiveArtifactIdentity:qualification.artifactIdentity,...(qualification.mode==='local-remote'?{productiveRemoteModelId:qualification.remoteModelId,productiveRemoteArtifactIdentity:qualification.remoteArtifactIdentity}:qualification.mode==='local-remotes'?{productiveRemoteProfiles:qualification.remoteProfiles,productiveProviderCaps:qualification.providerCaps}:{})});
       if(assignment.kind!=='social'&&productive.length&&!sharing)return undefined;
       if(activeRuns.length&&!small(modelId)&&activeRuns.some(r=>!small(r.modelId))&&(!sharing||activeRuns.some(r=>!small(r.modelId)&&identity(r.modelId)!==qualification.artifactIdentity)))return undefined;
-      const run=this.put('runs',{employeeId:employee.id,assignmentId:assignment.id,modelId,policyRevision:this.policy.revision,workspace:options.workspace ?? (assignment.projectId?this.need('projects',assignment.projectId).workspace ?? null:null),sessionId:null,runtimeDispatch:'claimed',status:'running',attempt:assignment.attempts+1,leaseUntil:new Date(Date.now()+(options.leaseMs ?? 120_000)).toISOString(),heartbeatAt:NOW(),tokenRevoked:false});
+      const run=this.put('runs',{employeeId:employee.id,assignmentId:assignment.id,modelId,policyRevision:this.policy.revision,workspace:options.workspace ?? (assignment.resumeRunId?this.get('runs',assignment.resumeRunId)?.workspace:undefined) ?? (assignment.projectId?this.need('projects',assignment.projectId).workspace ?? null:null),sessionId:null,runtimeDispatch:'claimed',status:'running',attempt:assignment.attempts+1,leaseUntil:new Date(Date.now()+(options.leaseMs ?? 120_000)).toISOString(),heartbeatAt:NOW(),tokenRevoked:false});
       this.update('assignments',assignment.id,{status:'running',attempts:run.attempt,...(assignment.resourceWait?{resourceWait:null}:{})});
       this.emit('run.claimed',{runId:run.id,assignmentId:assignment.id}); return run;
     }).immediate();
@@ -953,8 +972,9 @@ export class CompanyStore {
     return this.db.transaction(() => {
       const run=this.need('runs',runId), assignment=this.need('assignments',run.assignmentId);
       if (TERMINAL.has(run.status)) return run;
-      const status=run.tokenRevoked?'interrupted':result.status;
+      const status=result.status==='uncertain'?'uncertain':run.tokenRevoked?'interrupted':result.status;
       const ended=this.update('runs',runId,{...result,status,tokenRevoked:true,endedAt:NOW()});
+      if(status==='uncertain'||status==='interrupted'&&assignment.status==='running')this.update('assignments',assignment.id,{resumeRunId:run.id});
       if (assignment.status==='running') {
         if (status==='succeeded') {
           // Management/conversation/governance persist their commands. Implementation needs an artifact and independent review.
@@ -963,7 +983,7 @@ export class CompanyStore {
           else if(assignment.kind==='implementation'&&artifact&&(artifact.runId===run.id||artifact.verification?.passed&&artifact.verification.runId===run.id&&artifact.verification.identity===artifact.identity))this.update('assignments',assignment.id,{status:'awaiting_review'});
           else if (['management','conversation','governance','assessment'].includes(assignment.kind) && ((run.corporateCommands?.length ?? 0)>0 || result.managementResult?.summary)) this.update('assignments',assignment.id,{status:'completed',completedAt:NOW()});
           else this.update('assignments',assignment.id,{status:'blocked',blockedReason:'Run ended without a submitted artifact; management must inspect preserved workspace'});
-        } else if (status==='interrupted' && this.need('employees',assignment.employeeId).status==='active') this.update('assignments',assignment.id,{status:'queued',availableAt:NOW(),resumeRunId:run.id});
+        } else if (status==='interrupted' && this.need('employees',assignment.employeeId).status==='active') this.update('assignments',assignment.id,{status:'queued',availableAt:NOW()});
         else if (status==='failed' && result.transient && assignment.attempts<=this.policy.maxRetries) this.update('assignments',assignment.id,{status:'queued',availableAt:new Date(Date.now()+5000).toISOString()});
         else this.update('assignments',assignment.id,{status:'blocked',blockedReason:result.error ?? status});
       }
@@ -972,9 +992,10 @@ export class CompanyStore {
   }
   recoverRuns(observation?: (run: EmployeeRun) => 'running'|'absent'|'uncertain') {
     const recovered: EmployeeRun[]=[];
-    for (const run of this.list('runs').filter(r=>r.status==='running'||r.status==='cancelling'||r.status==='queued')) {
+    for (const run of this.list('runs').filter(r=>r.status==='running'||r.status==='cancelling'||r.status==='queued'||r.status==='uncertain')) {
       const observed=observation?.(run) ?? 'uncertain';
       if (observed==='running'&&!run.tokenRevoked) continue;
+      if(run.status==='uncertain'){if(observed==='absent'){this.update('runs',run.id,{status:'interrupted',tokenRevoked:true,endedAt:NOW(),error:'Previously uncertain runtime now confirmed absent'});this.update('assignments',run.assignmentId,{resumeRunId:run.id});}recovered.push(this.need('runs',run.id));continue;}
       this.revokeRun(run.id,'service restart');
       const ended=this.finishRun(run.id,{status:observed==='absent'?'interrupted':'uncertain',error:observed==='uncertain'?'Runtime/workspace ownership requires reconciliation':'Runtime confirmed absent; preserved workspace ready to resume'});
       if (observed==='uncertain') { this.update('runs',ended.id,{status:'uncertain'}); const assignment=this.need('assignments',run.assignmentId); if (assignment.status==='queued') this.update('assignments',assignment.id,{status:'blocked',blockedReason:'Reconcile previous runtime/workspace before redispatch'}); }
