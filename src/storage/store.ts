@@ -478,9 +478,10 @@ export class CompanyStore {
         return this.put('assignments',{projectId:c.projectId ?? null,employeeId:employee.id,supervisorId,title:required(c.title,'Title'),instructions:required(c.instructions,'Instructions'),acceptance,dependencies,status:'queued',priority:finite(c.priority,0),attempts:0,corrections:0,kind:c.kind ?? 'implementation',availableAt:NOW(),accepted,payload:c.payload ?? {},...(completionRequirements?{completionRequirements,requirementsDeclaration:{actorId:authorId,runId:actor.kind==='employee'?actor.runId:null,at:NOW(),rationale:required(c.rationale,'Completion requirement rationale')}}:{})});
       }
       case 'assignment.accept': {
-        const assignment=this.need('assignments',c.assignmentId); this.manager(actor,assignment.employeeId);
+        const assignment=this.need('assignments',c.assignmentId),employee=this.need('employees',assignment.employeeId);
+        if(!(actor.kind==='employee'&&actor.employeeId===employee.id&&!employee.homeManagerId))this.manager(actor,assignment.employeeId);
         if (!['queued','blocked'].includes(assignment.status) || this.need('employees',assignment.employeeId).status!=='active') throw new DomainError('invalid_transition','Staffing decisions require queued or blocked work for an active employee');
-        const approved=c.accept!==false, rationale=approved?(c.rationale ?? 'Home management accepted the shared assignment'):required(c.rationale,'Reason for declining shared staffing');
+        const approved=c.accept!==false, rationale=approved?(c.rationale ?? 'Staffing decision accepted the shared assignment'):required(c.rationale,'Reason for declining shared staffing');
         const decision={approved,employeeId:assignment.employeeId,managerId:authorId,runId:actor.kind==='employee'?actor.runId:null,rationale,at:NOW()};
         const result=this.update('assignments',assignment.id,{accepted:approved,...(!approved?{status:'blocked',blockedReason:rationale}:{}),staffingDecision:decision,staffingDecisions:[...(assignment.staffingDecisions??[]),decision]});
         if(actor.kind==='employee'){const request=this.need('assignments',this.need('runs',actor.runId).assignmentId);if(request.schedulerKey?.startsWith('staffing:')&&request.payload?.staffingAssignmentId===assignment.id&&request.payload?.staffingEmployeeId===assignment.employeeId)this.update('assignments',request.id,{status:'completed',completedAt:NOW(),completionEvidence:{staffingAssignmentId:assignment.id,runId:actor.runId}});}
