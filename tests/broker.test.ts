@@ -1019,6 +1019,20 @@ it('current-assignment ordering preserves employee scope and leaves other collec
  expect(JSON.stringify(bounded.items.find((employee:any)=>employee.id===manager.id).positionTitle).length).toBeLessThan(500);
 });
 
+it('direct staffing tools retain required fields, receipts and executive authority',async()=>{
+ const actor=actorFor(ceo),tools=broker.toolsFor(actor);
+ expect(tools.find(t=>t.name==='create_position')!.inputSchema.required).toEqual(['title','level','responsibilities']);
+ await expect(broker.call(actor,'create_position',{title:'Engineer',level:'worker'})).rejects.toMatchObject({code:'missing_command_fields'});
+ await expect(broker.call(actor,'create_position',{type:'employee.dismiss',title:'Engineer',level:'worker',responsibilities:'Inspect actual source'})).rejects.toMatchObject({code:'command_arguments'});
+ const position=await broker.call(actor,'create_position',{title:'Engineer',level:'worker',responsibilities:'Inspect actual source'});
+ const employee=await broker.call(actor,'hire_employee',{name:'Specialist',positionId:position.id,modelId:model,role:'Inspect source and report actual findings within granted authority.'});
+ expect(store.need('employees',employee.id).homeManagerId).toBe(ceo.id);
+ const project=await broker.call(actor,'create_project',{name:'Useful inspection',outcome:'Source-linked finding',acceptance:['Actual finding'],rationale:'Evidence supports bounded inspection'});
+ expect(store.need('projects',project.id).supervisorId).toBe(ceo.id);
+ const executive=await broker.call(actor,'create_position',{title:'Executive',level:'executive',responsibilities:'Executive accountability'});
+ await expect(broker.call(actor,'hire_employee',{name:'Unapproved executive',positionId:executive.id,modelId:model})).rejects.toThrow();
+});
+
 it('retains per-command required fields in the advertised flattened tool',()=>{
  const actor=actorFor(ceo),tool=broker.toolsFor(actor).find(t=>t.name==='company_command')!;
  expect(tool.description).toContain('project.create: name, outcome, acceptance, rationale');

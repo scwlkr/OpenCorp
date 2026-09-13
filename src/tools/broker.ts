@@ -21,7 +21,7 @@ import { ConnectedTools, fetchPublic, type ConnectedScope } from './connected.js
 import { executeSandboxed } from '../runtime/index.js';
 import { brokerEnvironment, redact } from './process.js';
 import { verificationOutput } from './verification-output.js';
-import { assignmentPayload, commandProperties, employeeCommands, commandSchema, validateCommandFields } from './commands.js';
+import { assignmentPayload, commandFields, commandProperties, employeeCommands, commandSchema, validateCommandFields } from './commands.js';
 
 export const executiveProposalGuide=`This assignment ends after one executive appointment proposal is recorded. Read existing positions/employees and pending decisions to avoid duplicate identities or proposals. Read models only if an installed model ID is needed.
 If the executive position is absent, company_command {command:{type:"position.create",title,level:"executive",responsibilities}} creates its position only.
@@ -164,7 +164,9 @@ function fitReadPages(result:any){
  }
  return result;
 }
+const directManagementCommands:Record<string,string>={create_position:'position.create',hire_employee:'employee.hire',create_project:'project.create'};
 export const brokerTools=[
+ ...Object.entries(directManagementCommands).map(([name,type])=>{const fields=commandFields[type]!;return {name,description:`${type} with direct arguments; no command wrapper. Existing authority and model policy apply.`,inputSchema:objectSchema(Object.fromEntries([...fields.required,...fields.optional].map(key=>[key,commandProperties[key]])),fields.required)};}),
  {name:'finish_assignment',description:'Complete original work from independently reviewed artifact/delivery evidence; declared criteria and source checks apply.',inputSchema:objectSchema({assignmentId:string,artifactId:string,rationale:string},['assignmentId','artifactId','rationale'])},
  {name:'skill_discover',description:'Discover pinned Agency Agents role seeds or search skills.sh for relevant competencies. Choose actual source files; optional repository must come from that query returned matches.',inputSchema:objectSchema({source:{type:'string',enum:['agency','skills']},query:string,repository:string},['source'])},
  {name:'skill_import',description:'Import a selected MIT source as inert data, preserving commit, license and hash. Inspect content and adapt it to OpenCorp.',inputSchema:objectSchema({catalogId:string,path:string,adaptation:string},['catalogId','path','adaptation'])},
@@ -304,7 +306,7 @@ Record the next accountable action with company_command {command:{type:"responsi
  toolsFor(actor:Actor){
   const scoped=this.scopedToolsFor(actor);
   const commands=scoped.find(tool=>tool.name==='company_command')?.inputSchema.properties.command.anyOf.map((branch:any)=>branch.properties.type.enum[0])??[];
-  const direct:Record<string,string>={update_role:'role.update',write_knowledge:'knowledge.write',send_message:'message.send',create_workplace_event:'workplace.event.create',create_assignment:'assignment.create',accept_onboarding:'recruitment.onboard'};
+  const direct:Record<string,string>={...directManagementCommands,update_role:'role.update',write_knowledge:'knowledge.write',send_message:'message.send',create_workplace_event:'workplace.event.create',create_assignment:'assignment.create',accept_onboarding:'recruitment.onboard'};
   const reviewAvailable=commands.some((command:string)=>['recruitment.approve','recruitment.reject'].includes(command));
   const retryFault=actor.kind==='employee'?this.store.faultContext(actor.runId):undefined;
   const tools=scoped.filter(tool=>tool.name==='revise_and_retry_assignment'?retryFault?.diagnosis.status==='running'&&retryFault.assignment.status==='blocked':tool.name==='review_candidate'?reviewAvailable:!direct[tool.name]||commands.includes(direct[tool.name]));
@@ -523,6 +525,14 @@ Record the next accountable action with company_command {command:{type:"responsi
     if(!assignedVote&&!readOnly)throw new DomainError('initial_vote_required',`Before other corporate mutations, record your independent initial decision.vote for this assignment. Prefer vote_decision with direct arguments decisionId="${assignment.payload.decisionId}", approve (your boolean judgment), rationale (your independent reason). Use company_command with these fields directly inside command: type="decision.vote", decisionId="${assignment.payload.decisionId}", approve (your boolean judgment), rationale (your independent reason). Do not nest these fields in payload. company_help includes a complete call example. Normal proposal authority resumes after that vote.`,403);
    }
    let result:any;switch(name){
+   case 'create_position':
+   case 'hire_employee':
+   case 'create_project':{
+    const type=directManagementCommands[name]!;this.commandHelp(actor,type);
+    const fields=commandFields[type]!,allowed=[...fields.required,...fields.optional];
+    if(Object.keys(args).some(key=>!allowed.includes(key)))throw new DomainError('command_arguments',`${name} takes direct command fields, without type or a command wrapper.`);
+    const command:CorporateCommand={type,...args};validateCommandFields(command);result=commandReceipt(command,this.store.command(actor,command));break;
+   }
    case 'create_workplace_event':{
     this.commandHelp(actor,'workplace.event.create');
     const fields=['channelId','title','purpose','participantIds','scheduledAt','eventType','subjectEmployeeId','recurrence','durationMinutes','maxTurnsPerParticipant'];
