@@ -273,7 +273,7 @@ describe('scoped retained evidence',()=>{
   await broker.call(reader,'company_command',{command:{type:'decision.vote',decisionId:decision.id,approve:false,rationale:'My independently formed dissent'}});
   expect(store.snapshot(reader).decisions.some(d=>d.id===followup.id)).toBe(true);expect((await broker.call(reader,'company_detail',{collection:'decisions',id:followup.id})).content).toContain('PEER_FOLLOWUP_JUDGMENT');
  });
- it.each(['dependency-wait','responsibility'])('keeps %s mixed recovery chains, requests and descendant decisions blind to each unvoted Elder',async(lastKind)=>{
+ it.each(['dependency-wait','responsibility','message'])('keeps %s mixed recovery chains, requests and descendant decisions blind to each unvoted Elder',async(lastKind)=>{
   const elders=store.list('employees').filter(employee=>store.level(employee.id)==='elder'),[peer,reader,third]=elders.map(employee=>actorFor(employee));
   const decision=store.command(owner,{type:'decision.create',kind:'executive.review',subject:'Independent leadership assessment',rationale:'Judge actual evidence',payload:{employeeId:ceo.id}});
   for(const elder of [peer,reader,third])store.update('assignments',store.need('runs',elder.runId).assignmentId,{kind:'governance',payload:{decisionId:decision.id}});
@@ -284,6 +284,11 @@ describe('scoped retained evidence',()=>{
   store.update('assignments',firstId,{schedulerKey:`dependency-wait:${originalId}:fixture`,title:`${secret} dependency diagnosis`,payload:{blockedAssignmentId:originalId}});
   store.update('assignments',middleId,{schedulerKey:'fault:fixture-failure',title:`${secret} fault descendant`,payload:{failedAssignmentId:firstId}});
   store.update('assignments',lastId,{schedulerKey:`${lastKind}:${middleId}:fixture`,title:`${secret} recovery descendant`,payload:lastKind==='responsibility'?{sourceAssignmentId:middleId}:{blockedAssignmentId:middleId}});
+  if(lastKind==='message'){
+   const message=store.command(middle,{type:'message.send',recipientId:ceo.id,content:secret,wake:false});
+   store.update('assignments',lastId,{employeeId:ceo.id,schedulerKey:`message:${message.id}`,payload:{incomingMessageId:message.id}});
+   store.update('runs',last.runId,{employeeId:ceo.id});last.employeeId=ceo.id;
+  }
   for(const origin of [first,middle,last])store.update('runs',origin.runId,{text:secret});
   const request=store.put('attention',{kind:'owner_decision',status:'open',title:secret,detail:secret,assignmentId:lastId,runId:last.runId});
   store.put('attention',{kind:'owner_decision',status:'open',title:secret,detail:secret,assignmentId:originalId});
@@ -1130,7 +1135,7 @@ it('direct internal message requires authored content and an existing recipient 
  const req=store.put('experiences',{kind:'requisition',status:'open'});
  await expect(broker.call(actor,'send_message',{...args,projectId:req.id})).rejects.toThrow();
  expect(store.list('messages')).toEqual(before);
- expect(await broker.call(actor,'company_help',{commandType:'message.send'})).toMatchObject({preferredTool:'send_message',directFields:['recipientId','content','projectId']});
+ expect(await broker.call(actor,'company_help',{commandType:'message.send'})).toMatchObject({preferredTool:'send_message',directFields:['recipientId','content','projectId','wake']});
  const result=await broker.call(actor,'send_message',args);
  expect(store.need('messages',result.id)).toMatchObject({...args,senderId:worker.id,runId:actor.runId,projectId:null});
  expect(store.need('runs',actor.runId).corporateCommands.some((receipt:any)=>receipt.type==='message.send'&&receipt.id===result.id)).toBe(true);
