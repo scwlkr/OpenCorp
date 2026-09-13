@@ -144,7 +144,8 @@ describe('corporate-only formation dispatch',()=>{
 describe('durable dispatch boundaries',()=>{
   it('uses the tailored expansion role and selected references without a generic hierarchy seed',async()=>{
     store.command(owner,{type:'company.expand',mandate:'Form specialist departments through actual recruitment'});
-    store.update('employees',run.employeeId,{role:'Own tailored workforce competency adaptation and onboarding.',competencies:['candidate adaptation'],sourceIds:['pinned-recruitment-source']});
+    store.command(owner,{type:'role.update',employeeId:run.employeeId,content:'Own tailored workforce competency adaptation and onboarding.',source:'Pinned competencies',rationale:'Tailor the skill'});
+    store.update('employees',run.employeeId,{competencies:['candidate adaptation'],sourceIds:['pinned-recruitment-source']});
     const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture stops at runtime dispatch');}),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
     await (scheduler as any).execute(store.need('runs',run.id));
     const system=execute.mock.calls[0][0].system;expect(system).toContain('Own tailored workforce competency adaptation and onboarding.');expect(system).toContain(`Current run ID: ${run.id}.`);
@@ -834,7 +835,7 @@ it('dispatches the canonical provision-only packet without unrelated company con
  store.command(owner,{type:'knowledge.write',scope:'company',content:'UNRELATED_COMPANY_INLINE_NOTE',source:'Independent fixture company note'});
  const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture ends at dispatch');}),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,broker,'http://localhost');
  const expected=broker.provisionPrompt(actor)!;await (scheduler as any).execute(store.need('runs',run.id));
- const request=execute.mock.calls[0][0];expect(request.system).toBe(expected.system);expect(request.prompt).toBe(expected.prompt);expect(request.corporateOnly).toBe(true);expect(request.provisionOnly).toBe(true);expect(request.prompt).not.toContain('UNRELATED_COMPANY_INLINE_NOTE');expect(request.system).not.toContain('Product implementations require');expect(request.prompt).toContain(candidate.id);expect(request.prompt).toContain(req.id);
+ const request=execute.mock.calls[0][0];expect(request.system.endsWith(expected.system)).toBe(true);expect(request.system).toContain(store.need('employees',run.employeeId).role);expect(request.prompt).toBe(expected.prompt);expect(request.corporateOnly).toBe(true);expect(request.provisionOnly).toBe(true);expect(request.prompt).not.toContain('UNRELATED_COMPANY_INLINE_NOTE');expect(request.system).not.toContain('Product implementations require');expect(request.prompt).toContain(candidate.id);expect(request.prompt).toContain(req.id);
 });
 
 import {ProviderCooldownError} from '../src/runtime/resource-budget.js';

@@ -46,12 +46,16 @@ export class CompanyStore {
   get<T extends TableName>(table: T, id: string): Tables[T] | undefined {
     this.table(table);
     const row = this.db.prepare(`SELECT data FROM ${table} WHERE id=?`).get(id) as {data: string} | undefined;
-    return row ? JSON.parse(row.data) : undefined;
+    return row ? this.projectRecord(table, JSON.parse(row.data)) : undefined;
   }
   need<T extends TableName>(table: T, id: string): Tables[T] { const item = this.get(table, id); if (!item) throw new DomainError('not_found', `${table} record ${id} does not exist`, 404); return item; }
   list<T extends TableName>(table: T): Tables[T][] {
     this.table(table);
-    return (this.db.prepare(`SELECT data FROM ${table} ORDER BY created_at,rowid`).all() as {data: string}[]).map(row => JSON.parse(row.data));
+    return (this.db.prepare(`SELECT data FROM ${table} ORDER BY created_at,rowid`).all() as {data: string}[]).map(row => this.projectRecord(table, JSON.parse(row.data)));
+  }
+  private projectRecord<T extends TableName>(table:T,record:Tables[T]):Tables[T] {
+    if(table==='employees' && this.vault) return {...record,role:this.vault.approvedRole(record as Employee)};
+    return record;
   }
   activeRuns():EmployeeRun[] {
     return (this.db.prepare("SELECT data FROM runs WHERE status IN ('running','cancelling','uncertain') ORDER BY created_at,rowid").all() as {data:string}[]).map(row=>JSON.parse(row.data));
@@ -62,6 +66,7 @@ export class CompanyStore {
   }
   put<T extends TableName>(table: T, value: Partial<Tables[T]> & Record<string, any>): Tables[T] {
     this.table(table);
+    if(table==='employees' && value.roleVersion && this.list('roleVersions').some(r=>r.employeeId===value.id&&r.version===value.roleVersion&&r.hash)) { value={...value}; delete value.role; }
     const record = { ...value, id: value.id ?? randomUUID(), createdAt: value.createdAt ?? NOW(), updatedAt: NOW() } as Tables[T];
     this.db.prepare(`INSERT INTO ${table}(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data`).run(record.id, JSON.stringify(record));
     return record;
@@ -508,8 +513,7 @@ export class CompanyStore {
       case 'role.update': {
         this.manager(actor,c.employeeId); const employee=this.need('employees',c.employeeId);
         const content=required(c.content,'Role instructions');
-        const role=this.put('roleVersions',{employeeId:employee.id,version:employee.roleVersion+1,content,source:required(c.source,'Source evidence'),rationale:required(c.rationale,'Rationale'),authorId,runId:actor.kind==='employee'?actor.runId:null});
-        this.update('employees',employee.id,{role:content,roleVersion:role.version}); return role;
+        return this.vault.approveRole(employee,content,{source:required(c.source,'Source evidence'),rationale:required(c.rationale,'Rationale'),authorId,runId:actor.kind==='employee'?actor.runId:null});
       }
       case 'experience.record': {
         const employeeId=c.employeeId ?? authorId;
