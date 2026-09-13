@@ -58,10 +58,12 @@ test('actual successful adopted tool use satisfies a management work checkpoint 
  expect(managementOutcome(store,assignment,run).passed).toBe(false);store.update('experiences',receipt.id,{status:'succeeded',exitCode:0});expect(managementOutcome(store,assignment,run).passed).toBe(true);
 });
 
-test('concurrency requalification cannot leave an active limit above its measured level',()=>{
+test('historical observations do not silently change Owner capacity',()=>{
  store.command(owner,{type:'policy.update',maxInference:11,concurrencyQualification:{passed:true,stableMaxInference:11,largePlusSmall:true,evidence:'Fixture eleven-way measurement'}});
- try{store.command(owner,{type:'policy.update',concurrencyQualification:{passed:true,stableMaxInference:2,largePlusSmall:true,evidence:'Fixture lower measured stable level'}});}catch{/* Rejecting the inconsistent change or capping it atomically both preserve safety. */}
- expect(store.policy.maxInference).toBeLessThanOrEqual(store.policy.concurrencyQualification.stableMaxInference);
+ store.command(owner,{type:'policy.update',concurrencyQualification:{passed:true,stableMaxInference:2,largePlusSmall:true,evidence:'Fixture lower measured stable level'}});
+ expect(store.policy.maxInference).toBe(11);
+ store.command(owner,{type:'policy.update',maxInference:2});
+ expect(store.policy.maxInference).toBe(2);
 });
 
 test('resolved Owner input resumes accountable management once instead of repeating the same request',()=>{

@@ -15,12 +15,12 @@ import { OwnedLoopbackProxy } from './loopback.js';
 import { DirectFree, directFreeCooldown } from './direct-free.js';
 import { directFreeProvider, productiveSharingAllowed } from '../core/inference-policy.js';
 import { OpenRouterFree } from './openrouter.js';
-import { microInstallSelection, OwnedOllama, availablePort, selectLocalModel } from './ollama.js';
+import { configuredModelAliases, microInstallSelection, OwnedOllama, availablePort, selectLocalModel } from './ollama.js';
 import { ResourceBudget, ResourceAdmissionError, ProviderAvailabilityError } from './resource-budget.js';
 import { RunGateway } from './gateway.js';
 import { minimalEnvironment, prepareHome, spawnOwned, stopOwned, recoverOwnedReceipt, recoverOwnedJobs } from './processes.js';
 import { openCodeCommand, wrapWorker } from './sandbox.js';
-import { MODEL_ALIASES, CONTEXT_TOKENS, RuntimeExecutionError, type RuntimeFailureEvidence, type RuntimeFailureCode, type ExecuteRequest, type RuntimeModel, type RuntimeEvent, type RuntimeOptions, type RuntimeResult, type NativeStepLimit } from './types.js';
+import { CONTEXT_TOKENS, RuntimeExecutionError, type RuntimeFailureEvidence, type RuntimeFailureCode, type ExecuteRequest, type RuntimeModel, type RuntimeEvent, type RuntimeOptions, type RuntimeResult, type NativeStepLimit } from './types.js';
 export * from './types.js';
 export { executeSandboxed } from './tool-process.js';
 export { wrapWorker, opencodeBinary, dependenciesRoot } from './sandbox.js';
@@ -153,7 +153,7 @@ export class LocalRuntime {
 
   private reserveMixedProductive(request:ExecuteRequest,model:RuntimeModel):void {
     const limits=this.resources.limits;
-    if(!limits.productiveRemoteModelId&&!limits.productiveRemoteProfiles||request.workload==='social')return;
+    if(request.workload==='social')return;
     if(this.productiveBindings.size&&!productiveSharingAllowed(model,[...this.productiveBindings.values()],limits))throw new ResourceAdmissionError('Qualified mixed productive slot already occupied or binding mismatched');
     this.productiveBindings.set(request.runId,model);
   }
@@ -203,6 +203,7 @@ export class LocalRuntime {
 
   async execute(request: ExecuteRequest): Promise<RuntimeResult> {
     if (this.stopping) throw new Error('Runtime stopping; new dispatch refused');
+    if (request.textOnly) request = { ...request, brokerUrl: undefined, token: undefined };
     const dispatchProvider:ProviderId|'pool'=request.modelId==='free-pool'?'pool':directFreeProvider(request.modelId)??(request.modelId.endsWith(':free')?'openrouter':'local');
     if(request.dataClass==='confidential'&&dispatchProvider!=='local')throw new Error('Confidential work requires local inference');
     if(this.testingProvider===dispatchProvider)throw new ResourceAdmissionError('Provider diagnostic in progress');
@@ -246,7 +247,7 @@ export class LocalRuntime {
         await this.reserveRemote(request,model,signal);
         return await this.run({ ...request, contextTokens: 32768 }, model, signal, provider);
       }
-      const micro = Object.entries(MODEL_ALIASES).some(([id, alias]) => id.startsWith('micro-') && (request.modelId === id || request.modelId === alias || request.modelId === `opencorp-${id}-${request.contextTokens ?? CONTEXT_TOKENS}:latest`));
+      const micro = Object.entries(configuredModelAliases(this.options)).some(([id, alias]) => id.startsWith('micro-') && (request.modelId === id || request.modelId === alias || request.modelId === `opencorp-${id}-${request.contextTokens ?? CONTEXT_TOKENS}:latest`));
       const ollama = micro ? this.microOllama : this.ollama;
       await ollama.start();
       signal.throwIfAborted();
@@ -259,7 +260,6 @@ export class LocalRuntime {
           signal.throwIfAborted();
           this.reserveMixedProductive(request,model);
           const samePool = [...this.admittedPools.values()].filter(entry => entry.pool === ollama);
-          if (samePool.some(entry => entry.identity !== model.artifactIdentity)) throw new ResourceAdmissionError('Owned model pool is occupied by another active profile');
           const residentBytes = await ollama.prepareResidency(model, !samePool.length, signal);
           signal.throwIfAborted();
           releaseResources = this.resources.admit(request.runId, model, request.workload, residentBytes, ollama === this.microOllama ? 'micro' : 'primary');
@@ -521,18 +521,19 @@ export function runtimeCompletion(finishReason: string | null, continuations: nu
 }
 
 export function runtimeConfig(model: RuntimeModel, url: string, secret: string, hasBroker: boolean,
-  employee?: Pick<ExecuteRequest, 'system' | 'workspace' | 'workload' | 'corporateOnly' | 'provisionOnly'>): Config {
+  employee?: Pick<ExecuteRequest, 'system' | 'workspace' | 'workload' | 'corporateOnly' | 'provisionOnly' | 'textOnly'>): Config {
   const selected = `opencorp-local/${model.alias}`;
+  const withoutTools = employee?.workload === 'social' || employee?.textOnly === true;
   // Normal upstream compaction drops promptAsync.system on its synthetic user
   // continuation. The per-run agent prompt is reapplied on every employee turn.
   // https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/compaction.ts#L489
   // https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/session/llm/request.ts#L52
   const employeePrompt = [
-    employee?.workload==='social'?'You are a persistent AI employee participating in a bounded internal chat. Reply directly without tools or work artifacts.':
+    withoutTools?'You are a persistent AI employee completing a bounded supplied-text request. Reply directly without tools or work artifacts.':
     'You are a persistent OpenCorp employee executing the supplied assignment. Use tools to inspect and perform real work. Delegate through corporate tools only. Report actual results and errors. Never fabricate a completed action.',
     employee?.system,
     employee?.corporateOnly && 'This task uses corporate tools only. Read retained company records and imported sources through corporate tools; repository evidence uses corporate repository tools. Native file, shell and todo tools are unavailable for this task. After native compaction, call company_help to refresh the current assignment guide and retained progress. An exact-hash source inspection recorded complete in this same run remains complete after compaction. Reuse retained findings; use skill_read only for specific missing or changed source content. Complete only the missing actual assigned action, then report its retained result.',
-    employee && employee.workload!=='social' && !employee.corporateOnly && `The authoritative native workspace is ${JSON.stringify(resolve(employee.workspace))}. Use this workspace for native file and shell tools; repository origin or localPath fields refer to other checkouts and do not change your workspace. Search with grep or glob before reading large files. Native read uses one-based line offsets: specify a focused limit of about 150 lines and read additional relevant ranges only as needed. Corporate repo_read uses character offsets, as its schema states. After compaction, reuse retained findings and source locations; reread only specific missing or changed sections instead of repeatedly loading unchanged documents in full.`,
+    employee && !withoutTools && !employee.corporateOnly && `The authoritative native workspace is ${JSON.stringify(resolve(employee.workspace))}. Use this workspace for native file and shell tools; repository origin or localPath fields refer to other checkouts and do not change your workspace. Search with grep or glob before reading large files. Native read uses one-based line offsets: specify a focused limit of about 150 lines and read additional relevant ranges only as needed. Corporate repo_read uses character offsets, as its schema states. After compaction, reuse retained findings and source locations; reread only specific missing or changed sections instead of repeatedly loading unchanged documents in full.`,
   ].filter(Boolean).join('\n\n');
   return {
     model: selected, small_model: selected, enabled_providers: ['opencorp-local'],
@@ -543,18 +544,18 @@ export function runtimeConfig(model: RuntimeModel, url: string, secret: string, 
       // already disables Bun's native fetch timeout. The run owns cancellation.
       // https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/provider/provider.ts#L1687
       options: { baseURL: `${url}/v1`, apiKey: secret, timeout: false, headerTimeout: false, chunkTimeout: false },
-      models: { [model.alias]: { name: model.alias, tool_call: employee?.workload!=='social' && model.capabilities.includes('tools'), attachment: model.capabilities.includes('vision'),
+      models: { [model.alias]: { name: model.alias, tool_call: !withoutTools && model.capabilities.includes('tools'), attachment: model.capabilities.includes('vision'),
         modalities: { input: model.capabilities.includes('vision') ? ['text', 'image'] : ['text'], output: ['text'] },
         limit: { context: model.contextTokens, input: model.contextTokens, output: employee?.provisionOnly&&employee.corporateOnly?1024:4096 }, cost: { input: 0, output: 0 } } },
     } },
-    mcp: hasBroker ? { corporate: { type: 'remote', url: `${url}/mcp`, headers: { authorization: `Bearer ${secret}` }, oauth: false, timeout: 1800000 } } : {},
+    mcp: hasBroker && !withoutTools ? { corporate: { type: 'remote', url: `${url}/mcp`, headers: { authorization: `Bearer ${secret}` }, oauth: false, timeout: 1800000 } } : {},
     // OpenCode 1.18.30 honors reserved only when limit.input is explicit. Its
     // check uses the last completed turn, excluding the newest tool results.
     // Give 32K work an extra 4K tool-result margin; retain the existing 16K
     // threshold because complex company prompts already approach its floor.
     compaction: { auto: true, prune: true, reserved: model.contextTokens >= 32768 ? 8192 : 4096, preserve_recent_tokens: 2000, tail_turns: 1 },
-    tools: { ...(employee?.workload==='social'||employee?.corporateOnly?{read:false,edit:false,write:false,bash:false,glob:false,grep:false,todoread:false,todowrite:false,skill:false}:{}), task: false, question: false, webfetch: false, websearch: false, codesearch: false },
-    permission: employee?.workload==='social'?{'*':'deny'}:employee?.corporateOnly?{'*':'deny','corporate_*':'allow'}:{ '*': 'deny', read: 'allow', edit: 'allow', write: 'allow', bash: 'allow', glob: 'allow', grep: 'allow',
+    tools: { ...(withoutTools||employee?.corporateOnly?{read:false,edit:false,write:false,bash:false,glob:false,grep:false,todoread:false,todowrite:false,skill:false}:{}), task: false, question: false, webfetch: false, websearch: false, codesearch: false },
+    permission: withoutTools?{'*':'deny'}:employee?.corporateOnly?{'*':'deny','corporate_*':'allow'}:{ '*': 'deny', read: 'allow', edit: 'allow', write: 'allow', bash: 'allow', glob: 'allow', grep: 'allow',
       todowrite: 'allow', 'corporate_*': 'allow', external_directory: 'deny', task: 'deny', question: 'deny' },
     agent: { employee: { mode: 'primary', steps: 32, prompt: employeePrompt },
       general: { disable: true }, explore: { disable: true } },

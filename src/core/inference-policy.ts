@@ -45,7 +45,10 @@ export interface ProductiveLimits {maxProductiveTurns?:number;productiveArtifact
 /** Exact qualified sharing only; no model access is granted here. */
 export function productiveSharingAllowed(candidate:any,active:any[],limits:ProductiveLimits):boolean {
  const count=limits.maxProductiveTurns??1;
- if(count<2||active.length>=count||!candidate||active.some(model=>!model)||!limits.productiveArtifactIdentity)return false;
+ if(count<2||active.length>=count||!candidate||active.some(model=>!model))return false;
+ // Local capacity is an Owner limit, not a fixed model class or qualification ceremony.
+ if(!limits.productiveRemoteModelId&&!limits.productiveRemoteProfiles&&[candidate,...active].every(model=>model.local===true))return true;
+ if(!limits.productiveArtifactIdentity)return false;
  // Pool reservations enforce actual account capacities per request. Keep the owned local slot pinned.
  if ([candidate,...active].some(m=>m.provider==='pool')) {
   const all=[candidate,...active],locals=all.filter(m=>m.local===true);
