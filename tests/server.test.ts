@@ -83,3 +83,13 @@ it('retains an individual pause through recovery and refuses resumption before e
  expect(store.need('actions',action.id).status).toBe('succeeded');
  expect(()=>store.dispatchAction({kind:'employee',employeeId:employee.id,runId:run.id,policyRevision:store.policy.revision},action.id)).toThrow();
 });
+
+it('restricts Telegram send reconciliation to authenticated Owner requests',async()=>{
+ const {store,request}=setup();
+ const action=store.put('actions',{kind:'telegram.send',status:'uncertain'});
+ const init={method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({actionId:action.id,outcome:'absent',evidence:'Owner inspected the private chat.'})};
+ expect((await request('/api/v1/telegram/reconcile',{...init,headers:{...init.headers,authorization:'Bearer worker-token'}})).status).toBe(401);
+ expect(store.need('actions',action.id).status).toBe('uncertain');
+ expect((await request('/api/v1/telegram/reconcile',init)).status).toBe(200);
+ expect(store.need('actions',action.id)).toMatchObject({status:'prepared',retryCount:1});
+});

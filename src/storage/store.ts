@@ -539,7 +539,7 @@ export class CompanyStore {
       case 'message.send': {
         if (c.projectId) this.need('projects',c.projectId);
         const recipientId=c.recipientId ?? this.list('employees').find(e=>e.status==='active'&&this.level(e.id)==='ceo')?.id ?? null;
-        if (recipientId) this.need('employees',recipientId);
+        if (recipientId&&recipientId!=='owner') this.need('employees',recipientId);
         if(c.wake!==undefined&&typeof c.wake!=='boolean')throw new DomainError('invalid_input','wake must be a boolean');
         const message=this.put('messages',{senderId:authorId,recipientId,projectId:c.projectId ?? null,content:required(c.content,'Content'),runId:actor.kind==='employee'?actor.runId:null});
         const recipient=this.get('employees',recipientId);

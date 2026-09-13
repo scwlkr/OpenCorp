@@ -1479,3 +1479,13 @@ it('withholds confidential assignments and derived runs from hosted summaries an
  store.update('runs',actor.runId,{modelId:model});
  expect(JSON.stringify(await broker.call(actor,'company_detail',{collection:'assignments',id:confidential.id}))).toContain('SYNTHETIC_PRIVATE_INSTRUCTIONS');
 });
+
+it('keeps unassigned Telegram intake out of hosted context while sharing it with the local CEO',async()=>{
+ const message=store.put('messages',{senderId:'owner',recipientId:ceo.id,projectId:null,runId:null,content:'SYNTHETIC_PRIVATE_TELEGRAM',telegram:{direction:'incoming'}});
+ const actor=actorFor(ceo);
+ store.update('assignments',store.need('runs',actor.runId).assignmentId,{kind:'conversation'});
+ expect(JSON.stringify(broker.promptContext(actor))).toContain('SYNTHETIC_PRIVATE_TELEGRAM');
+ store.update('runs',actor.runId,{modelId:'synthetic-hosted-route'});
+ expect(JSON.stringify(broker.promptContext(actor))).not.toContain('SYNTHETIC_PRIVATE_TELEGRAM');
+ await expect(broker.call(actor,'company_detail',{collection:'messages',id:message.id})).rejects.toMatchObject({code:'evidence_forbidden'});
+});
