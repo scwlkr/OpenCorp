@@ -6,7 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { minimalEnvironment, prepareHome, spawnOwned, stopOwned, recoverOwnedReceipt, type OwnedProcess } from './processes.js';
-import { resourceLimits, ResourceAdmissionError } from './resource-budget.js';
+import { resourceLimits, localParallel } from './resource-budget.js';
 import { MODEL_ALIASES, CONTEXT_TOKENS, type LocalModel, type LocalInferenceProfile, type RuntimeOptions } from './types.js';
 
 const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
@@ -17,6 +17,31 @@ function manifestBlobs(raw: Buffer): ModelBlob[] {
   const blobs = [...manifest.layers, manifest.config];
   if (blobs.some(blob => !/^sha256:[a-f0-9]{64}$/.test(blob.digest) || !Number.isSafeInteger(blob.size) || blob.size < 0)) throw new Error('Invalid local layer identity');
   return blobs;
+}
+
+/** Operator-provided aliases only expose installed artifacts; inventory never downloads them. */
+export function configuredModelAliases(options: RuntimeOptions): Record<string, string> {
+  const additional = options.localModelAliases ?? {};
+  if (!additional || typeof additional !== 'object' || Array.isArray(additional)) throw new Error('Invalid local model aliases');
+  for (const [id, alias] of Object.entries(additional)) {
+    if (!/^micro-[a-z0-9-]{1,60}$/.test(id) || Object.hasOwn(MODEL_ALIASES, id) || typeof alias !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,100}:[a-zA-Z0-9][a-zA-Z0-9._-]{0,50}$/.test(alias) || /cloud/i.test(alias)) throw new Error('Invalid candidate local model alias');
+  }
+  return { ...MODEL_ALIASES, ...additional };
+}
+
+/** Dense grouped-query attention upper bound at f16, even though the service requests q8 KV.
+ * Recurrent/hybrid and unknown layouts retain the conservative fallback until observed.
+ */
+function contextMemory(modelInfo: Record<string, unknown> | undefined, contextTokens: number): number | undefined {
+  const architecture = modelInfo?.['general.architecture'];
+  if (typeof architecture !== 'string' || !['llama', 'qwen2', 'qwen3'].includes(architecture)) return;
+  const value = (key: string) => Number(modelInfo?.[`${architecture}.${key}`]);
+  const layers = value('block_count'), kvHeads = value('attention.head_count_kv');
+  const headSize = value('embedding_length') / value('attention.head_count');
+  const keySize = modelInfo?.[`${architecture}.attention.key_length`] === undefined ? headSize : value('attention.key_length');
+  const valueSize = modelInfo?.[`${architecture}.attention.value_length`] === undefined ? headSize : value('attention.value_length');
+  if (![layers, kvHeads, keySize, valueSize].every(n => Number.isSafeInteger(n) && n > 0)) return;
+  return Math.ceil(contextTokens * layers * kvHeads * (keySize + valueSize) * 2 * 1.2 + 256 * 1024 ** 2);
 }
 
 /** New candidates are never added to the existing default download set. */
@@ -30,7 +55,7 @@ export function localInferenceProfile(modelId: string, nemotronProfile?: Runtime
   if (modelId === 'qwen-low-reasoning-48k') return { id: 'qwen-low-reasoning-v1', reasoningEffort: 'low' };
   if (modelId === 'nemotron-no-thinking-v1') return { id: 'nemotron-no-thinking-v1', reasoningEffort: 'none' };
   if (modelId === 'nemotron' && nemotronProfile === 'nemotron-no-thinking-v1') return { id: nemotronProfile, reasoningEffort: 'none' };
-  return modelId === 'qwen-main' || modelId === 'qwen-main-48k' || modelId.startsWith('micro-') ? { id: 'qwen-no-thinking-v1', reasoningEffort: 'none' } : undefined;
+  return modelId === 'qwen-main' || modelId === 'qwen-main-48k' || ['micro-06','micro-17','micro-4'].includes(modelId) ? { id: 'qwen-no-thinking-v1', reasoningEffort: 'none' } : undefined;
 }
 
 export function localArtifactIdentity(model: Pick<LocalModel, 'alias' | 'manifestDigest' | 'templateDigest' | 'parametersDigest' | 'contextTokens' | 'inferenceProfile'>): string {
@@ -83,7 +108,7 @@ export class OwnedOllama {
     this.modelStore = join(this.root, 'models');
   }
 
-  private aliases() { return Object.entries(MODEL_ALIASES).filter(([id]) => id.startsWith('micro-') === (this.pool === 'micro')); }
+  private aliases() { return Object.entries(configuredModelAliases(this.options)).filter(([id]) => id.startsWith('micro-') === (this.pool === 'micro')); }
 
   async start(): Promise<void> {
     if (this.stopping) throw new Error('Owned Ollama is stopping');
@@ -182,7 +207,7 @@ export class OwnedOllama {
     this.url = `http://127.0.0.1:${port}`;
     const binary = this.options.ollamaBinary ?? '/Applications/Ollama.app/Contents/Resources/ollama';
     const limits = resourceLimits(this.options.resourceBudget);
-    const parallel = this.pool === 'micro' ? Math.min(10, limits.maxSocialTurns, limits.maxConcurrentTurns) : (limits.productiveRemoteModelId||limits.productiveRemoteProfiles) ? 1 : limits.maxProductiveTurns;
+    const parallel = localParallel(limits, this.pool);
     const child = await spawnOwned({
       controlRoot: join(this.options.dataRoot, 'runtime', 'control'), command: binary,
       args: ['serve'], cwd: this.root,
@@ -191,7 +216,7 @@ export class OwnedOllama {
         ...minimalEnvironment(this.root), OLLAMA_HOST: `127.0.0.1:${port}`,
         OLLAMA_MODELS: this.modelStore, OLLAMA_NO_CLOUD: '1',
         OLLAMA_CONTEXT_LENGTH: String(CONTEXT_TOKENS), OLLAMA_NUM_PARALLEL: String(parallel),
-        OLLAMA_MAX_LOADED_MODELS: '1', OLLAMA_KEEP_ALIVE: '60s',
+        OLLAMA_MAX_LOADED_MODELS: String(limits.maxLoadedModels), OLLAMA_KEEP_ALIVE: '60s',
         OLLAMA_MAX_QUEUE: String(limits.maxConcurrentTurns), OLLAMA_FLASH_ATTENTION: '1', OLLAMA_KV_CACHE_TYPE: 'q8_0',
       },
       onOutput: (chunk) => { this.output = (this.output + chunk).slice(-16000); },
@@ -211,7 +236,7 @@ export class OwnedOllama {
           await writeFile(join(this.root, 'service.json'), JSON.stringify({
             url: this.url, guardianPid: child.pid, ownerPid: process.pid,
             version: await response.json(), cloudDisabled: true,
-            contextTokens: CONTEXT_TOKENS, concurrentInference: parallel, maxLoadedModels: 1, pool: this.pool, modelStore: this.modelStore,
+            contextTokens: CONTEXT_TOKENS, concurrentInference: parallel, maxLoadedModels: limits.maxLoadedModels, pool: this.pool, modelStore: this.modelStore,
           }, null, 2), { mode: 0o600 });
           return;
         }
@@ -299,7 +324,6 @@ export class OwnedOllama {
       signal.throwIfAborted();
       const sourceTag = tags.find((model) => model.name === sourceAlias);
       if (!sourceTag) continue;
-      if (this.pool === 'micro' && sourceTag.size > (id === 'micro-4' ? 3 : 2) * 1024 ** 3) throw new Error('Micro pool refuses weights larger than the selected artifact budget');
       if (sourceTag.remote_host || sourceTag.remote_model) throw new Error(`Hosted source refused: ${sourceAlias}`);
       const alias = `opencorp-${id}-${contextTokens}:latest`;
       let tag = tags.find((model) => model.name === alias);
@@ -331,7 +355,7 @@ export class OwnedOllama {
         body: JSON.stringify({ model: alias }), signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
       });
       if (!response.ok) throw new Error(`Cannot inspect local artifact ${alias}`);
-      const show = await response.json() as { template?: string; parameters?: string; capabilities?: string[]; remote_host?: string; remote_model?: string };
+      const show = await response.json() as { template?: string; parameters?: string; capabilities?: string[]; model_info?: Record<string, unknown>; remote_host?: string; remote_model?: string };
       if (show.remote_host || show.remote_model) throw new Error(`Hosted profile refused: ${alias}`);
       const templateDigest = digest(show.template ?? '');
       // Ollama renders parameter maps in unspecified order. Identity tracks
@@ -341,7 +365,7 @@ export class OwnedOllama {
       const artifactIdentity = localArtifactIdentity({ alias, manifestDigest, templateDigest, parametersDigest, contextTokens, inferenceProfile });
       models.push({ id: contextTokens === 49152 ? 'qwen-main-48k' : id, name: contextTokens === 49152 ? 'Qwen (48K context)' : sourceAlias, alias, sourceAlias, provider: 'ollama', local: true, available: true,
         manifestDigest, templateDigest, parametersDigest, artifactIdentity, ...(inferenceProfile ? { inferenceProfile } : {}),
-        size: tag.size, sizeClass: id.startsWith('micro-') ? 'micro' : id === 'small' ? 'small' : 'large', capabilities: show.capabilities ?? [], contextTokens });
+        size: tag.size, contextMemoryBytes: contextMemory(show.model_info, contextTokens), sizeClass: id.startsWith('micro-') ? 'micro' : id === 'small' ? 'small' : 'large', capabilities: show.capabilities ?? [], contextTokens });
       // Current Qwen GGUF Jinja template explicitly supports the qualitative low cue.
       if (contextTokens === 49152 && show.capabilities?.includes('thinking') && show.template?.includes("resolved_reasoning_effort == 'low'") && show.template.includes('Reasoning effort is set to low.')) {
         const variant = { ...models.at(-1)!, id: 'qwen-low-reasoning-48k', name: 'Qwen (48K low reasoning)', inferenceProfile: localInferenceProfile('qwen-low-reasoning-48k') };
@@ -365,21 +389,26 @@ export class OwnedOllama {
       combined.throwIfAborted();
       const response = await fetch(`${this.url}/api/ps`, { signal: AbortSignal.any([combined, AbortSignal.timeout(10000)]) });
       if (!response.ok) throw new Error(`Owned model residency HTTP ${response.status}`);
-      const body = await response.json() as { models: Array<{ name: string; digest: string; size_vram: number }> };
+      const body = await response.json() as { models: Array<{ name: string; digest: string; size_vram: number; size?: number }> };
       if (!Array.isArray(body.models)) throw new Error('Invalid owned residency observation');
       return body.models;
     };
     let residents = await loaded();
     for (const resident of residents.filter(entry => entry.name !== model.alias || entry.digest !== model.manifestDigest)) {
-      if (!mayEvict) throw new ResourceAdmissionError('Owned model pool is occupied by another active profile');
+      if (!mayEvict) continue;
       const response = await fetch(`${this.url}/api/generate`, { method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: resident.name, keep_alive: 0, stream: false }), signal: AbortSignal.any([combined, AbortSignal.timeout(30000)]) });
       if (!response.ok) throw new Error(`Owned idle model unload HTTP ${response.status}`);
       await response.text();
     }
     residents = await loaded();
-    if (residents.some(entry => entry.name !== model.alias || entry.digest !== model.manifestDigest)) throw new Error('Owned idle model still resident after unload');
+    if (mayEvict && residents.some(entry => entry.name !== model.alias || entry.digest !== model.manifestDigest)) throw new Error('Owned idle model still resident after unload');
     const resident = residents.find(entry => entry.name === model.alias && entry.digest === model.manifestDigest);
+    const observed = resident?.size;
+    if (typeof observed === 'number' && Number.isFinite(observed) && observed > model.size) {
+      const perSlot = Math.ceil((observed - model.size) / localParallel(resourceLimits(this.options.resourceBudget), this.pool));
+      model.contextMemoryBytes = Math.max(model.contextMemoryBytes ?? model.contextTokens * 65536 + 256 * 1024 ** 2, perSlot);
+    }
     return resident && Number.isFinite(resident.size_vram) && resident.size_vram > 0 ? Math.min(model.size * 1.2, resident.size_vram) : 0;
   }
 
@@ -393,7 +422,7 @@ export class OwnedOllama {
 
   status(): { url: string; guardianPid?: number; running: boolean; cloudDisabled: true; concurrentInference: number } {
     return { url: this.url, guardianPid: this.process?.pid, running: this.process?.exitCode === null,
-      cloudDisabled: true, concurrentInference: this.pool === 'micro' ? Math.min(10, resourceLimits(this.options.resourceBudget).maxSocialTurns, resourceLimits(this.options.resourceBudget).maxConcurrentTurns) : (resourceLimits(this.options.resourceBudget).productiveRemoteModelId||resourceLimits(this.options.resourceBudget).productiveRemoteProfiles) ? 1 : resourceLimits(this.options.resourceBudget).maxProductiveTurns };
+      cloudDisabled: true, concurrentInference: localParallel(resourceLimits(this.options.resourceBudget), this.pool) };
   }
 
   async stop(): Promise<void> {

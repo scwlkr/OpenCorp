@@ -14,6 +14,8 @@ export interface LocalModel {
   /** Enforced by the owned gateway; part of artifactIdentity, not source weights. */
   inferenceProfile?: LocalInferenceProfile;
   size: number;
+  /** Conservative per-slot allocation from artifact architecture; absent uses fallback. */
+  contextMemoryBytes?: number;
   sizeClass?: 'micro' | 'small' | 'large';
   capabilities: string[];
   contextTokens: number;
@@ -60,6 +62,7 @@ export interface RuntimeOptions {
   openRouterFree?: { rateBudgetPath?:string; modelIds: string[]; readApiKey: () => Promise<string>; noByokVerified: true; cooldown?: { read: () => ProviderBackoff | undefined; write: (value: ProviderBackoff | undefined) => void } };
   ollamaBinary?: string;
   modelStore?: string;
+  localModelAliases?: Record<string, string>;
   /** Trusted opt-in qualification only; absent preserves the default Nemotron behavior. */
   nemotronInferenceProfile?: 'nemotron-no-thinking-v1';
   onEvent?: (event: RuntimeEvent) => void;
@@ -84,6 +87,8 @@ export interface ExecuteRequest {
   workload?: 'productive' | 'social';
   /** Trusted scheduler selection for corporate-only formation work; not a model argument. */
   corporateOnly?: boolean;
+  /** Explicit bounded supplied-text work; no native or corporate tools. */
+  textOnly?: boolean;
   /** Trusted exact provisioning packet selected by the scheduler, never a model argument. */
   provisionOnly?: boolean;
   /** Trusted scheduler confirms no effects precede initial inference; rechecked on deferral. */

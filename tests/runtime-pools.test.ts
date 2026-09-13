@@ -41,8 +41,8 @@ describe('separate owned model pools', () => {
       const primary = new OwnedOllama(options), micro = new OwnedOllama(options, 'micro');
       await expect(primary.start()).rejects.toThrow('Fixture stops');
       await expect(micro.start()).rejects.toThrow('Fixture stops');
-      expect(calls[0].env).toMatchObject({ OLLAMA_NUM_PARALLEL: String(mixed?1:productiveTurns), OLLAMA_MAX_LOADED_MODELS: '1', OLLAMA_NO_CLOUD: '1' });
-      expect(calls[1].env).toMatchObject({ OLLAMA_NUM_PARALLEL: '10', OLLAMA_MAX_LOADED_MODELS: '1', OLLAMA_NO_CLOUD: '1' });
+      expect(calls[0].env).toMatchObject({ OLLAMA_NUM_PARALLEL: String(mixed?1:productiveTurns), OLLAMA_MAX_LOADED_MODELS: '2', OLLAMA_NO_CLOUD: '1' });
+      expect(calls[1].env).toMatchObject({ OLLAMA_NUM_PARALLEL: '10', OLLAMA_MAX_LOADED_MODELS: '2', OLLAMA_NO_CLOUD: '1' });
       expect(calls[0].receiptPath).not.toBe(calls[1].receiptPath);
       expect(primary.modelStore).not.toBe(micro.modelStore);
       expect(primary.status().concurrentInference).toBe(mixed?1:productiveTurns);
@@ -94,4 +94,12 @@ it('preserves the 8K compaction margin for explicit 48K Qwen and refuses broad o
   await expect(runtime.execute(request)).rejects.toThrow('explicit productive');
   await expect(runtime.execute({ ...request, modelId: 'qwen-main-48k', workload: 'social' })).rejects.toThrow('explicit productive');
   expect(start).not.toHaveBeenCalled();
+});
+
+it('supplied-text productive work exposes no tools even with a broker configured',()=>{
+ const model={alias:'fixture',capabilities:['tools'],contextTokens:16384} as LocalModel;
+ const config=runtimeConfig(model,'http://127.0.0.1:1','synthetic',true,{system:'Summarize supplied facts',workspace:'/tmp/fixture',workload:'productive',textOnly:true});
+ expect(config.mcp).toEqual({});expect(config.permission).toEqual({'*':'deny'});
+ expect(config.tools).toMatchObject({read:false,write:false,edit:false,bash:false,skill:false});
+ expect(config.provider?.['opencorp-local'].models?.fixture.tool_call).toBe(false);
 });

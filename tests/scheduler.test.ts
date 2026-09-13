@@ -766,8 +766,8 @@ it.each(['matching','default','different-profile','same-employee','same-project'
  vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);
  const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined);
  await scheduler.tick();
- expect(execute).toHaveBeenCalledTimes(scenario==='matching'?1:0);
- if(scenario==='matching')expect(execute.mock.calls[0][0]).toMatchObject({assignmentId:target.id,employeeId:employee.id});
+ expect(execute).toHaveBeenCalledTimes(['matching','different-profile'].includes(scenario)?1:0);
+ if(['matching','different-profile'].includes(scenario))expect(execute.mock.calls[0][0]).toMatchObject({assignmentId:target.id,employeeId:employee.id});
  if(scenario==='same-project'||scenario==='same-employee')expect(store.claimNext({assignmentId:target.id})).toBeUndefined();
 });
 

@@ -21,7 +21,7 @@ it('refuses to evict active pool weights or accept uncertain unload', async () =
   const response = () => new Response(JSON.stringify({ models: [{ name: 'other', digest: 'other', size_vram: 1000 }] }));
   const fetch = vi.fn().mockImplementation(async () => response()); vi.stubGlobal('fetch', fetch);
   const ollama = new OwnedOllama({ dataRoot: '/unused-residency-fixture' });
-  await expect(ollama.prepareResidency(model, false, new AbortController().signal)).rejects.toThrow('active profile');
-  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(await ollama.prepareResidency(model, false, new AbortController().signal)).toBe(0);
+  expect(fetch.mock.calls.every(call=>!call[1]?.method || call[1].method==='GET')).toBe(true);
   await expect(ollama.prepareResidency(model, true, new AbortController().signal)).rejects.toThrow('still resident');
 });

@@ -3,7 +3,7 @@ import { ResourceBudget, resourceLimits, macMemorySnapshot, ResourceAdmissionErr
 import type { LocalModel } from '../src/runtime/types.js';
 
 const GiB = 1024 ** 3;
-const micro = { artifactIdentity: 'micro', size: 0.6 * GiB, contextTokens: 16384 } as LocalModel;
+const micro = { id: 'micro-06', artifactIdentity: 'micro', size: 0.6 * GiB, contextTokens: 16384 } as LocalModel;
 const strong = { artifactIdentity: 'strong', size: 18 * GiB, contextTokens: 16384 } as LocalModel;
 const memory = () => ({ total: 64 * GiB, free: 40 * GiB });
 
@@ -32,8 +32,7 @@ describe('bounded local resource admission', () => {
   });
   it('reserves pending allocations before provider memory readings catch up', () => {
     const budget = new ResourceBudget({ maxConcurrentTurns: 11, maxSocialTurns: 10 }, () => ({ total: 64 * GiB, free: 8 * GiB }));
-    for (let i = 0; i < 4; i++) budget.admit(`micro-${i}`, micro, 'social');
-    expect(() => budget.admit('too-many', micro, 'social')).toThrow('host memory');
+    expect(() => budget.admit('preallocated', micro, 'social')).toThrow('host memory');
   });
   it('bounds residency, rejects duplicate identities, and serializes strong work', () => {
     const budget = new ResourceBudget({ maxConcurrentTurns: 3 }, memory);
@@ -41,12 +40,12 @@ describe('bounded local resource admission', () => {
     expect(() => budget.admit('first', micro)).toThrow('Duplicate');
     expect(() => budget.admit('second', strong)).toThrow('residency');
     release(); budget.admit('first', strong);
-    expect(() => budget.admit('second', strong)).toThrow('Strong-model');
+    expect(() => budget.admit('second', strong)).toThrow('productive');
   });
   it('defaults conservatively and validates configuration before startup', () => {
     expect(resourceLimits().maxConcurrentTurns).toBe(1);
-    expect(() => resourceLimits({ maxConcurrentTurns: 12 })).toThrow('Invalid');
-    expect(() => resourceLimits({ maxSocialTurns: 11 })).toThrow('Invalid');
+    expect(() => resourceLimits({ maxConcurrentTurns: 1.5 })).toThrow('Invalid');
+    expect(() => resourceLimits({ maxSocialTurns: 0 })).toThrow('Invalid');
     expect(() => resourceLimits({ minFreeMemoryBytes: NaN })).toThrow('Invalid');
   });
 });
@@ -75,8 +74,8 @@ it('credits actually observed resident weights on repeated turns without waiving
 });
 
 it('retains shared pending weights until the last admitted identity releases', () => {
-  const budget = new ResourceBudget({ maxConcurrentTurns: 4, maxLoadedModels: 2 }, () => ({ total: 64 * GiB, free: 8 * GiB }));
-  const shared = { ...micro, size: 2 * GiB };
+  const budget = new ResourceBudget({ maxConcurrentTurns: 4, maxProductiveTurns: 2, maxLoadedModels: 2 }, () => ({ total: 64 * GiB, free: 8 * GiB }));
+  const shared = { ...micro, size: 2 * GiB, contextMemoryBytes: Math.round(0.625 * GiB) };
   const first = budget.admit('first', shared);
   const second = budget.admit('second', shared);
   first();
@@ -113,7 +112,7 @@ it('charges the selectable Nemotron profile as the same heavy primary weights', 
   const variant = { ...strong, id: 'nemotron-no-thinking-v1', sizeClass: 'large', artifactIdentity: 'variant', inferenceProfile: { id: 'nemotron-no-thinking-v1', reasoningEffort: 'none' } } as LocalModel;
   const candidate = new ResourceBudget({ maxConcurrentTurns: 2, maxLoadedModels: 2 }, memory);
   candidate.admit('variant', variant);
-  expect(() => candidate.admit('default', strong)).toThrow('Strong-model compute slot occupied');
+  expect(() => candidate.admit('default', strong)).toThrow('productive');
   const limited = new ResourceBudget({}, () => ({ total: 64 * GiB, free: 3 * GiB }));
   expect(() => limited.admit('variant', variant)).toThrow('host memory');
 });
@@ -139,16 +138,15 @@ it('precharges both primary slots and retains them until the last shared run rel
   expect(() => budget.admit('third', model, 'productive', 0, 'primary')).toThrow('productive');
   first();
   expect(() => budget.admit('social', { ...micro, id: 'micro-06' }, 'social', 0, 'micro')).toThrow('memory');
-  expect(() => budget.admit('changed', { ...model, artifactIdentity: 'b'.repeat(64) }, 'productive', 0, 'primary')).toThrow('profile');
+  expect(() => budget.admit('changed', { ...model, artifactIdentity: 'b'.repeat(64) }, 'productive', 0, 'primary')).toThrow('memory');
   second();
   budget.admit('social', { ...micro, id: 'micro-06' }, 'social', 0, 'micro')();
 });
 
-it('requires an explicit identity for two productive turns and does not share unqualified profiles', () => {
-  expect(() => resourceLimits({ maxConcurrentTurns: 2, maxProductiveTurns: 2 })).toThrow('exact artifact');
-  const budget = new ResourceBudget({ maxConcurrentTurns: 2, maxProductiveTurns: 2, productiveArtifactIdentity: 'a'.repeat(64) }, memory);
-  budget.admit('first', strong);
-  expect(() => budget.admit('second', strong)).toThrow('productive');
+it('admits different productive local profiles up to configured slots and memory', () => {
+  const budget = new ResourceBudget({ maxConcurrentTurns: 3, maxProductiveTurns: 3, maxLoadedModels: 3 }, memory);
+  for (let index = 0; index < 3; index++) budget.admit(String(index), { ...micro, artifactIdentity: String(index) });
+  expect(() => budget.admit('overflow', micro)).toThrow('slots occupied');
 });
 
 it('mixed qualification charges one primary context and refuses a second local turn without losing the first reservation',()=>{
@@ -166,4 +164,14 @@ it('mixed qualification charges one primary context and refuses a second local t
 it('five productive capacities never enable a second local allocation or double its KV',()=>{
  const model={...strong,artifactIdentity:'a'.repeat(64),contextTokens:49152};const options={maxConcurrentTurns:5,maxProductiveTurns:5,productiveArtifactIdentity:model.artifactIdentity,productiveRemoteProfiles:[{modelId:'gemini:fixture',artifactIdentity:'b'.repeat(64),maxConcurrentTurns:4}],productiveProviderCaps:[{provider:'gemini' as const,maxConcurrentTurns:4}]};
  const budget=new ResourceBudget(options,()=>({total:64*GiB,free:model.size*1.2+3.25*GiB+2*GiB}));const release=budget.admit('one',model,'productive',0,'primary');expect(()=>budget.admit('two',model,'productive',0,'primary')).toThrow('only one local');release();expect(()=>resourceLimits({...options,productiveRemoteProfiles:undefined})).toThrow();expect(()=>resourceLimits({...options,productiveRemoteModelId:'gemini:fixture',productiveRemoteArtifactIdentity:'b'.repeat(64)})).toThrow();
+});
+
+it('rechecks larger observed context allocation while the profile remains shared',()=>{
+ const budget=new ResourceBudget({maxConcurrentTurns:2,maxProductiveTurns:2,maxLoadedModels:2},()=>({total:64*GiB,free:8*GiB}));
+ const release=budget.admit('first',{...micro,contextMemoryBytes:GiB});
+ expect(()=>budget.admit('second',{...micro,contextMemoryBytes:4*GiB})).toThrow('memory');
+ expect(budget.status().activeTurns).toBe(1);
+ expect(()=>budget.admit('other',{...micro,artifactIdentity:'other',contextMemoryBytes:GiB})).toThrow('memory');
+ release();
+ expect(()=>budget.admit('other',{...micro,artifactIdentity:'other',contextMemoryBytes:GiB})).not.toThrow();
 });

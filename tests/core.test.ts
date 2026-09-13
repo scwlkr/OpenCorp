@@ -295,11 +295,11 @@ it.each(['executive.appoint','executive.replace'])('previews the current CEO sel
  expect(store.need('decisions',decision.id)).toEqual(decision);expect(store.need('employees',incumbent.id)).toEqual(incumbent);expect(store.list('votes')).toHaveLength(0);
 });
 
-it('keeps productive concurrency at one unless Owner records exact two-task qualification',()=>{
+it('keeps productive concurrency at one until Owner raises capacity',()=>{
   const mixed={passed:true,stableMaxInference:2,largePlusSmall:true,evidence:'Retained mixed trial'};
   store.command(owner,{type:'policy.update',maxInference:2,concurrencyQualification:mixed});
   expect(store.policy.maxProductiveTurns??1).toBe(1);
-  expect(()=>store.command(owner,{type:'policy.update',maxProductiveTurns:2})).toThrow('pinned evidence');
+  expect(()=>store.command(owner,{type:'policy.update',maxProductiveTurns:3})).toThrow('inference slots');
   const qualification={passed:true,artifactIdentity:'a'.repeat(64),evidence:'Retained real two-task trial'};
   const auth=actor();
   expect(()=>store.command(auth,{type:'policy.update',maxProductiveTurns:2,productiveConcurrencyQualification:qualification})).toThrow('Owner');
@@ -322,8 +322,6 @@ it('applies durable productive limits to small models as well as large models',(
  expect(store.claimNext({assignmentId:second.id})).toBeUndefined();
  store.update('policy',store.policy.id,{maxProductiveTurns:2,productiveConcurrencyQualification:{passed:true,artifactIdentity:identity,evidence:'Observed two-task qualification'}});
  store.update('employees',two.id,{modelId:alternative});
- expect(store.claimNext({assignmentId:second.id})).toBeUndefined();
- store.update('employees',two.id,{modelId:model});
  expect(store.claimNext({assignmentId:second.id})).toBeTruthy();
  expect(store.claimNext({assignmentId:third.id})).toBeUndefined();
 });
@@ -406,3 +404,13 @@ it('requires measured five-worker evidence and enforces exact profile and aggreg
  for(let i=0;i<5;i++){const remote=staff('Remote five '+i);store.command(owner,{type:'employee.model',employeeId:remote.id,modelId:remoteId,rationale:'Synthetic fixture'});const claim=store.claimNext({assignmentId:assignment(remote.id).id});if(i<4)expect(claim).toBeDefined();else expect(claim).toBeUndefined();}
  expect(store.list('runs').filter(r=>r.status==='running')).toHaveLength(5);
 });
+
+ it('admits independent local work within Owner capacity without model-class qualification',()=>{
+  store.command(owner,{type:'policy.update',maxInference:3,maxProductiveTurns:3});
+  const workers=[staff('First'),staff('Second'),staff('Third'),staff('Fourth')];
+  store.command(owner,{type:'employee.model',employeeId:workers[1]!.id,modelId:alternative,rationale:'Suitable bounded work'});
+  const work=workers.map(worker=>assignment(worker.id));
+  for(const item of work.slice(0,3))expect(store.claimNext({assignmentId:item.id})).toBeTruthy();
+  expect(store.claimNext({assignmentId:work[3]!.id})).toBeUndefined();
+  expect(workers.map(worker=>store.need('employees',worker.id).id)).toEqual(workers.map(worker=>worker.id));
+ });
