@@ -61,7 +61,7 @@ describe('native iteration exhaustion and checkpoint corrections',()=>{
   expect(retained.error).toContain('exhausted its 32 iterations');expect(retained.error).toContain('an artifact authored in this run');
   expect(blocked).toMatchObject({status:'blocked',attempts:1,instructions:assignment.instructions,acceptance:assignment.acceptance});expect(blocked.managementCorrections??0).toBe(0);expect(blocked.retryDecisions??[]).toEqual([]);
   const diagnoses=store.list('assignments').filter(a=>a.schedulerKey===`fault:${run.id}`);expect(diagnoses).toHaveLength(1);
-  expect(diagnoses[0]).toMatchObject({employeeId:assignment.supervisorId,kind:'management',payload:{failedRunId:run.id,failedAssignmentId:assignment.id}});expect(diagnoses[0].instructions).toContain('exhausted its 32 iterations');
+  expect(diagnoses[0]).toMatchObject({employeeId:assignment.supervisorId,kind:'management',payload:{failedRunId:run.id,failedAssignmentId:assignment.id}});expect(diagnoses[0].instructions).toContain(run.id);
   expect(readFileSync(partial,'utf8')).toBe('Actual preserved fixture edits, not a submitted artifact.\n');expect(JSON.parse(readFileSync(response.diagnosticsPath,'utf8'))).toMatchObject({runId:run.id,exhausted:true});expect(JSON.parse(readFileSync(response.messagesPath,'utf8'))).toHaveLength(1);
   expect(store.list('artifacts')).toEqual([]);expect(store.list('runs')).toHaveLength(1);expect(runtime).toHaveBeenCalledOnce();
  });

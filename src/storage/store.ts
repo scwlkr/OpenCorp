@@ -1,20 +1,24 @@
+import { homedir } from 'node:os';
+import type { ProviderBackoff } from '../core/provider-backoff.js';
 import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { homedir } from 'node:os';
-import { DomainError, type Actor, type Artifact, type Project, type Assignment, type AssignmentRequirement, type CorporateCommand, type TableName, type Tables, type CompanySnapshot, type CompanyEvent, type Employee, type PositionLevel, type EmployeeRun, type ExternalAction } from '../core/types.js';
+import { DomainError, POSITION_LEVEL_RANK as LEVEL, type Actor, type Artifact, type Project, type Assignment, type AssignmentRequirement, type CorporateCommand, type TableName, type Tables, type CompanySnapshot, type CompanyEvent, type Employee, type PositionLevel, type EmployeeRun, type ExternalAction } from '../core/types.js';
+import { permittedPooledModel, permittedDirectFreeModel, directFreeProvider, productiveSharingAllowed, validProductiveRemoteCapacity, productiveCapacity, permittedOpenRouterFreeModel, validOpenRouterFreeId } from '../core/inference-policy.js';
 import { deliveryFor, projectDispatchAllowed } from '../core/delivery.js';
 import { employeeNarrativeProjection } from '../core/runtime-protocol.js';
 import { reviewScopeIssue } from '../core/review-scope.js';
 import { migrate, TABLES } from './schema.js';
 import { KnowledgeVault } from './vault.js';
+import { workplaceCommand, workplaceSnapshot, socialDispatchAllowed } from '../core/workplace.js';
+import { responsibilityCommand } from '../core/responsibility.js';
+import { organizationCommand, authorizedRecruitment } from '../core/organization.js';
 
 const NOW = () => new Date().toISOString();
 const LARGE = 'wlkr-management-qwen3.8-27b-q4-k-m:latest';
 const ALTERNATIVE = 'wlkr-management-nemotron-3.5-lightning-30b-a3b-q4-0:latest';
-const LEVEL: Record<PositionLevel, number> = {elder: 0, ceo: 1, executive: 2, lead: 3, manager: 4, worker: 5, support: 5};
 const TERMINAL = new Set(['succeeded', 'failed', 'interrupted', 'uncertain']);
 
 function required(value: unknown, label: string): string {
@@ -48,6 +52,13 @@ export class CompanyStore {
   list<T extends TableName>(table: T): Tables[T][] {
     this.table(table);
     return (this.db.prepare(`SELECT data FROM ${table} ORDER BY created_at,rowid`).all() as {data: string}[]).map(row => JSON.parse(row.data));
+  }
+  activeRuns():EmployeeRun[] {
+    return (this.db.prepare("SELECT data FROM runs WHERE status IN ('running','cancelling','uncertain') ORDER BY created_at,rowid").all() as {data:string}[]).map(row=>JSON.parse(row.data));
+  }
+  assignmentBySchedulerKey(key:string):Assignment|undefined {
+    const row=this.db.prepare("SELECT data FROM assignments WHERE json_extract(data,'$.schedulerKey')=? ORDER BY created_at,rowid LIMIT 1").get(key) as {data:string}|undefined;
+    return row?JSON.parse(row.data):undefined;
   }
   put<T extends TableName>(table: T, value: Partial<Tables[T]> & Record<string, any>): Tables[T] {
     this.table(table);
@@ -103,8 +114,8 @@ export class CompanyStore {
       const blind=new Set(output.decisions.filter((decision:any)=>decision.eligibleElders?.includes(actor.employeeId)&&!voted.has(decision.id)).map((decision:any)=>decision.id));
       const blindPeers=new Set(output.decisions.filter((decision:any)=>blind.has(decision.id)).flatMap((decision:any)=>(decision.eligibleElders??[]).filter((id:string)=>id!==actor.employeeId)));
       output.employees=output.employees.map((employee:any)=>blindPeers.has(employee.id)?{...employee,modelRationale:undefined,modelChange:undefined}:employee);
-      const hiddenAssignments=new Set(output.assignments.filter((assignment:any)=>assignment.employeeId!==actor.employeeId&&assignment.kind==='governance'&&blind.has(assignment.payload?.decisionId)).map((assignment:any)=>assignment.id));
-      const recoveryOrigin=(assignment:any)=>assignment.schedulerKey?.startsWith('fault:')?assignment.payload?.failedAssignmentId:assignment.schedulerKey?.startsWith('dependency-wait:')?assignment.payload?.blockedAssignmentId:undefined;
+      const hiddenAssignments=new Set(output.assignments.filter((assignment:any)=>assignment.employeeId!==actor.employeeId&&assignment.kind==='governance'&&blind.has(assignment.payload?.decisionId)||assignment.schedulerKey?.startsWith('governance-application:')&&blind.has(assignment.payload?.sourceDecisionId)).map((assignment:any)=>assignment.id));
+      const recoveryOrigin=(assignment:any)=>assignment.schedulerKey?.startsWith('fault:')?assignment.payload?.failedAssignmentId:assignment.schedulerKey?.startsWith('dependency-wait:')?assignment.payload?.blockedAssignmentId:assignment.schedulerKey?.startsWith('responsibility:')?assignment.payload?.sourceAssignmentId:undefined;
       const hiddenRuns=new Set(output.runs.filter((run:any)=>hiddenAssignments.has(run.assignmentId)).map((run:any)=>run.id));
       // A peer may propose follow-up work after voting. Its proposal can disclose
       // that initial judgment, so withhold it from Elders who have not voted yet.
@@ -116,19 +127,20 @@ export class CompanyStore {
       while(hiddenChanged){
         const before=hiddenAssignments.size+hiddenRuns.size;
         const hiddenDecisions=new Set(output.decisions.filter((decision:any)=>hiddenRuns.has(decision.runId??decisionRuns.get(decision.id))).map((decision:any)=>decision.id));
-        for(const assignment of output.assignments)if(assignment.kind==='governance'&&hiddenDecisions.has(assignment.payload?.decisionId)||hiddenAssignments.has(recoveryOrigin(assignment)))hiddenAssignments.add(assignment.id);
+        for(const assignment of output.assignments)if(assignment.kind==='governance'&&hiddenDecisions.has(assignment.payload?.decisionId)||assignment.schedulerKey?.startsWith('governance-application:')&&hiddenDecisions.has(assignment.payload?.sourceDecisionId)||hiddenAssignments.has(recoveryOrigin(assignment)))hiddenAssignments.add(assignment.id);
         for(const run of output.runs)if(hiddenAssignments.has(run.assignmentId))hiddenRuns.add(run.id);
         hiddenChanged=before!==hiddenAssignments.size+hiddenRuns.size;
       }
       output.decisions=output.decisions.filter((decision:any)=>!hiddenRuns.has(decision.runId??decisionRuns.get(decision.id)));
       // Before the Elder's initial vote, even outcome counts and rationale from peers stay hidden.
-      output.decisions = output.decisions.map((decision: any) => decision.eligibleElders?.includes(actor.employeeId) && !voted.has(decision.id) ? {...decision, status: 'awaiting_your_independent_vote', result: undefined} : decision);
+      output.decisions = output.decisions.map((decision: any) => decision.eligibleElders?.includes(actor.employeeId) && !voted.has(decision.id) ? {...decision, status: 'awaiting_your_independent_vote', result: undefined, application: undefined, applicationHistory: undefined, override: undefined, overrideHistory: undefined} : decision);
     }
     output.decisions=output.decisions.map((decision:any)=>['executive.appoint','executive.replace'].includes(decision.kind)?{...decision,appointmentEffect:this.appointmentEffect(decision,output.employees,output.positions,output.appointments)}:decision);
     const recent = this.db.prepare('SELECT id FROM events ORDER BY id DESC LIMIT 1').get() as {id:number} | undefined;
     output.events = this.eventLog(Math.max(0,(recent?.id ?? 0)-200));
     if (actor?.kind === 'employee') output.events = output.events.filter((event: CompanyEvent) => !event.type.startsWith('decision.'));
-    output.resources = {activeRuns: output.runs.filter((r: EmployeeRun) => r.status === 'running').length, inferenceSlots: output.policy.maxInference, nativeJobs: output.policy.nativeJobs, localOnly: true, spendingLimit: output.policy.spendingLimit};
+    if(!actor)output.workplace=workplaceSnapshot(this);
+    output.resources = {activeRuns: output.runs.filter((r: EmployeeRun) => r.status === 'running').length, inferenceSlots: output.policy.maxInference, nativeJobs: output.policy.nativeJobs, localOnly: !(output.policy.openRouterFreeModels?.length||output.policy.directFreeModels?.length), directFreeModels: output.policy.directFreeModels??[], openRouterFreeModels: output.policy.openRouterFreeModels ?? [], spendingLimit: output.policy.spendingLimit};
     return output;
   }
 
@@ -140,11 +152,19 @@ export class CompanyStore {
     const name=candidateKind==='existing_employee'?candidate?.name??null:typeof payload.name==='string'?payload.name.trim():payload.name??null,appliedIds=new Set(appointments.filter(a=>a.decisionId===decision.id).map(a=>a.employeeId));
     const matches=candidateKind==='new_employee'?employees.filter(e=>e.status==='active'&&e.name===name&&!appliedIds.has(e.id)).map(e=>({employeeId:e.id,badge:e.badge,name:e.name,positionId:e.positionId,positionTitle:positions.find(p=>p.id===e.positionId)?.title??null,identityAndPositionUnchanged:!(decision.kind==='executive.replace'&&e.positionId===payload.positionId)})):[];
     const target=`${display(position?.title)} (${display(payload.positionId)})`;
+    const pending=['pending','awaiting_your_independent_vote'].includes(decision.status),targetAppointment=pending?appointments.find(a=>a.positionId===payload.positionId&&!a.endedAt):undefined;
+    const occupant=targetAppointment?employees.find(e=>e.id===targetAppointment.employeeId&&e.status==='active'):undefined;
+    const targetOccupant=occupant?{employeeId:occupant.id,name:occupant.name,positionId:occupant.positionId,appointmentId:targetAppointment!.id}:null;
+    const occupiedPosition=pending&&decision.kind==='executive.appoint'&&!!occupant&&occupant.id!==payload.employeeId;
+    const managementCycle=pending&&candidate?.status==='active'&&position?.level==='executive'&&positions.find(p=>p.id===candidate.positionId)?.level==='ceo';
     let summary=candidateKind==='new_employee'?`Approval would create a new employee named ${display(name)} with a new employee ID in ${target}.`:`Approval would appoint existing employee ${display(name)} (${display(payload.employeeId)}) to ${target}, preserving that employee ID.`;
+    if(occupiedPosition)summary=`Target ${target} is occupied by ${display(occupant!.name)} (${occupant!.id}). This executive.appoint cannot apply while another employee holds the active appointment (occupied_position); changing the occupant requires the distinct executive.replace governance operation. Candidate identity semantics: ${summary}`;
     if(decision.kind==='executive.replace')summary+=' The current target-position occupant, if any, would be dismissed first.';
     for(const match of matches.slice(0,3))summary+=match.identityAndPositionUnchanged?` Existing ${display(match.name)} (${match.badge}, ${match.employeeId}) retains ${display(match.positionTitle)} (${match.positionId}) and the same employee ID.`:` Existing ${display(match.name)} (${match.badge}, ${match.employeeId}) occupies the replacement target and would be dismissed.`;
     if(matches.length>3)summary+=` ${matches.length-3} additional same-name identities are listed in the retained decision detail view.`;
-    return {candidateKind,candidateEmployeeId:payload.employeeId||null,candidateName:name,targetPositionId:payload.positionId??null,targetPositionTitle:position?.title??null,summary,sameNameExistingEmployees:matches,derived:true,validation:'This explains candidate identity semantics; normal appointment validation still applies.'};
+    if(managementCycle)summary=`This transfer would make the current CEO ${display(candidate!.name)} (${candidate!.id}) report to themself in ${target}. The current reporting rules prevent application (management_cycle). ${summary}`;
+    if(decision.application?.status==='blocked')summary=`Governance approved this proposal, but application is blocked (${display(decision.application.code)}): ${display(decision.application.message)}. No application effects were retained. ${summary}`;
+    return {candidateKind,candidateEmployeeId:payload.employeeId||null,candidateName:name,targetPositionId:payload.positionId??null,targetPositionTitle:position?.title??null,summary,targetOccupant,occupiedPosition,managementCycle,sameNameExistingEmployees:matches,derived:true,validation:'This explains candidate identity semantics; normal appointment validation still applies.'};
   }
 
   level(employeeId: string): PositionLevel { const employee = this.need('employees',employeeId); return this.need('positions',employee.positionId).level; }
@@ -201,7 +221,9 @@ export class CompanyStore {
     }
   }
   private localModel(modelId: string) {
-    if (/cloud|openai|anthropic|openrouter|https?:/i.test(modelId)) throw new DomainError('hosted_inference_denied','All inference must use an installed permitted local model',403);
+    const remote = this.list('models').find(item => item.id === modelId);
+    if (permittedPooledModel(this.policy, remote)||permittedOpenRouterFreeModel(this.policy, remote)||permittedDirectFreeModel(this.policy,remote)) return;
+    if (remote?.local === false || remote?.provider && remote.provider !== 'ollama' || /cloud|openai|anthropic|openrouter|https?:/i.test(modelId)) throw new DomainError('hosted_inference_denied','Use an installed permitted local model or an exact Owner-allowlisted free provider model with current eligibility evidence',403);
     const model = this.list('models').find(item => item.id === modelId || item.name === modelId);
     if (!model || !model.local || !model.available || !model.artifactIdentity) throw new DomainError('unavailable_model','Model must be an available verified local artifact',409);
   }
@@ -237,7 +259,31 @@ export class CompanyStore {
 
   private executeCommand(actor: Actor, c: CorporateCommand): any {
     const authorId = actor.kind === 'owner' ? 'owner' : actor.employeeId;
+    if(['owner.request','responsibility.update','review.respond'].includes(c.type))return responsibilityCommand(this,actor,c);
+    if(c.type.startsWith('workplace.'))return workplaceCommand(this,actor,c);
+    if (['department.update','department.merge','position.update','recruitment.request','recruitment.candidate','recruitment.approve','recruitment.reject','recruitment.onboard'].includes(c.type)) return organizationCommand(this,actor,c);
     switch (c.type) {
+      case 'company.expand': {
+        if(actor.kind!=='owner')throw new DomainError('owner_required','Only the Owner activates the expansion contract',403);
+        return this.update('company',this.company.id,{expansion:{contract:'OpenCorp_Build_Plan.md foundational expansion 2026-09-11',startedAt:this.company.expansion?.startedAt??NOW()},mandate:required(c.mandate,'Expansion mandate')});
+      }
+      case 'recruitment.provision': {
+        const hire=authorizedRecruitment(this,actor,c);if(hire.employee)return hire.employee;
+        const {candidate,req,command}=hire;
+        const employee=this.executeCommand({kind:'employee',employeeId:req!.homeManagerId,runId:(actor as Extract<Actor,{kind:'employee'}>).runId,policyRevision:this.policy.revision},command!);
+        const roleVersion=this.list('roleVersions').find(r=>r.employeeId===employee.id&&r.version===1);if(roleVersion)this.update('roleVersions',roleVersion.id,{authorId:candidate!.authorship.authorId,runId:candidate!.authorship.runId,candidateId:candidate!.id});
+        this.update('experiences',candidate!.id,{status:'hired',employeeId:employee.id,provisionRunId:actor.kind==='employee'?actor.runId:null});
+        this.update('experiences',req!.id,{status:'filled',employeeId:employee.id});
+        return this.update('employees',employee.id,{requisitionId:req!.id,candidateId:candidate!.id,competencies:candidate!.competencies,sourceIds:candidate!.sourceIds,roleAuthorship:candidate!.authorship,onboarding:{status:'pending',instructions:candidate!.onboarding,firstWork:req!.firstWork}});
+      }
+      case 'product.register_internal': {
+        this.requireLevel(actor,['ceo','executive','lead','manager']);
+        const name=required(c.name,'Name'),managerId=actor.kind==='employee'?actor.employeeId:required(c.managerId,'Manager');
+        const prior=this.list('products').find(p=>p.kind==='internal-tool'&&p.name===name);if(prior)return prior;
+        const verificationCommand=required(c.verificationCommand,'Verification command');
+        if(!/^node (?:--test(?: [A-Za-z0-9_./*-]+)?|[A-Za-z0-9_./-]+\.(?:mjs|cjs|js))$/.test(verificationCommand))throw new DomainError('invalid_verifier','Internal tools use a dependency-free Node test command');
+        const id=randomUUID();return this.put('products',{id,name,kind:'internal-tool',managerId,repository:resolve(this.dataRoot,'repositories',`${id}.git`),verificationCommand,assessment:required(c.rationale,'Rationale'),goals:[],roadmap:[],status:'active',priority:0,rationale:c.rationale});
+      }
       case 'control': {
         if (actor.kind !== 'owner') throw new DomainError('owner_required','Lifecycle is an Owner control',403);
         const states: Record<string,string> = {start:'running',resume:'running',pause:'paused',stop:'stopped'};
@@ -248,10 +294,24 @@ export class CompanyStore {
       }
       case 'policy.update': {
         if (actor.kind !== 'owner') throw new DomainError('owner_required','Owner policy cannot be changed by employees',403);
-        if (c.localOnly === false || (c.spendingLimit !== undefined && c.spendingLimit !== 0) || c.allowedRepositories !== undefined) throw new DomainError('reserved_policy','Initial release remains local-only with $0 unapproved allowance and its registered access envelope; approve a concrete action separately',403);
+        if (c.localOnly === false || (c.spendingLimit !== undefined && c.spendingLimit !== 0) || c.allowedRepositories !== undefined) throw new DomainError('reserved_policy','Default inference remains local-only with $0 unapproved allowance and its registered access envelope; only exact free-provider allowlists may permit approved free hosted inference',403);
         const patch: any = {revision:this.policy.revision+1};
-        for (const [key,max] of [['maxInference',2],['nativeJobs',1],['maxRetries',1],['maxCorrections',2],['reassessMinutes',1440]] as const) if (c[key] !== undefined) { if (!Number.isInteger(c[key]) || c[key] < (key === 'maxRetries' ? 0 : 1) || c[key] > max) throw new DomainError('invalid_limit',`${key} is outside permitted release limits`); patch[key] = c[key]; }
-        if (patch.maxInference===2 && (!this.policy.concurrencyQualification?.passed || !this.policy.concurrencyQualification?.largePlusSmall || !this.policy.concurrencyQualification?.evidence)) throw new DomainError('qualification_required','Two inference slots require a retained realistic large-plus-small local qualification first');
+        if(c.freeInferencePool!==undefined){if(typeof c.freeInferencePool!=='boolean')throw new DomainError('invalid_pool','Free pool selection must be boolean');patch.freeInferencePool=c.freeInferencePool;}
+        if(c.directFreeModels!==undefined){if(!Array.isArray(c.directFreeModels)||c.directFreeModels.length>32||c.directFreeModels.some((id:unknown)=>!directFreeProvider(id))||new Set(c.directFreeModels).size!==c.directFreeModels.length)throw new DomainError('invalid_free_models','Specify unique exact permitted Groq, Gemini or Z.ai model IDs');patch.directFreeModels=[...c.directFreeModels];}
+        if(c.openRouterFreeModels!==undefined){if(!Array.isArray(c.openRouterFreeModels)||c.openRouterFreeModels.length>32||c.openRouterFreeModels.some((id:unknown)=>!validOpenRouterFreeId(id))||new Set(c.openRouterFreeModels).size!==c.openRouterFreeModels.length)throw new DomainError('invalid_free_models','Specify up to 32 unique exact vendor/model:free OpenRouter IDs; paid models and automatic routers are forbidden');patch.openRouterFreeModels=[...c.openRouterFreeModels];}
+        for (const [key,max] of [['maxProductiveTurns',5],['maxInference',11],['nativeJobs',1],['maxRetries',1],['maxCorrections',2],['reassessMinutes',1440]] as const) if (c[key] !== undefined) { if (!Number.isInteger(c[key]) || c[key] < (key === 'maxRetries' ? 0 : 1) || c[key] > max) throw new DomainError('invalid_limit',`${key} is outside permitted release limits`); patch[key] = c[key]; }
+        if(c.concurrencyQualification!==undefined){const q=c.concurrencyQualification;if(!q||q.passed!==true||!Number.isInteger(q.stableMaxInference)||q.stableMaxInference<1||q.stableMaxInference>11||typeof q.evidence!=='string'||!q.evidence.trim())throw new DomainError('invalid_qualification','Record measured stable concurrency and actual evidence');patch.concurrencyQualification={passed:true,stableMaxInference:q.stableMaxInference,largePlusSmall:q.largePlusSmall===true,evidence:q.evidence,recordedAt:NOW()};}
+        const qualification=patch.concurrencyQualification??this.policy.concurrencyQualification;
+        if ((patch.maxInference??this.policy.maxInference)>1 && (!qualification?.passed || !qualification?.largePlusSmall || !qualification?.evidence || (patch.maxInference??this.policy.maxInference)>(qualification.stableMaxInference??2))) throw new DomainError('qualification_required','Concurrent inference requires retained realistic mixed-workload qualification at this level first');
+        if(c.productiveConcurrencyQualification!==undefined){const q=c.productiveConcurrencyQualification;if(!q||q.passed!==true||typeof q.artifactIdentity!=='string'||!/^[a-f0-9]{64}$/.test(q.artifactIdentity)||typeof q.evidence!=='string'||!q.evidence.trim())throw new DomainError('invalid_qualification','Record the exact productive artifact and observed concurrent-task evidence');if(q.mode!==undefined&&q.mode!=='local-remote'&&q.mode!=='local-remotes')throw new DomainError('invalid_qualification','Unknown productive qualification mode');
+          if(q.mode==='local-remote'&&(!directFreeProvider(q.remoteModelId)&&!validOpenRouterFreeId(q.remoteModelId)||!/^[a-f0-9]{64}$/.test(q.remoteArtifactIdentity??'')))throw new DomainError('invalid_qualification','Mixed qualification requires an exact free remote model and artifact identity');
+          if(q.mode!=='local-remote'&&(q.remoteModelId!==undefined||q.remoteArtifactIdentity!==undefined))throw new DomainError('invalid_qualification','Remote pins require local-remote qualification mode');
+          if(q.mode==='local-remotes'&&(!validProductiveRemoteCapacity(q.remoteProfiles,q.providerCaps)||!Number.isInteger(q.stableMaxProductiveTurns)||q.stableMaxProductiveTurns<2||q.stableMaxProductiveTurns>5||q.stableMaxProductiveTurns>productiveCapacity(q.remoteProfiles,q.providerCaps)))throw new DomainError('invalid_qualification','Record exact remote profiles, provider capacities and observed productive level');
+          if(q.mode!=='local-remotes'&&(q.remoteProfiles!==undefined||q.providerCaps!==undefined||q.stableMaxProductiveTurns!==undefined))throw new DomainError('invalid_qualification','Remote capacities require local-remotes mode');
+          patch.productiveConcurrencyQualification={passed:true,artifactIdentity:q.artifactIdentity,...(q.mode==='local-remote'?{mode:q.mode,remoteModelId:q.remoteModelId,remoteArtifactIdentity:q.remoteArtifactIdentity}:q.mode==='local-remotes'?{mode:q.mode,stableMaxProductiveTurns:q.stableMaxProductiveTurns,remoteProfiles:q.remoteProfiles.map((p:any)=>({modelId:p.modelId,artifactIdentity:p.artifactIdentity,maxConcurrentTurns:p.maxConcurrentTurns})),providerCaps:q.providerCaps.map((p:any)=>({provider:p.provider,maxConcurrentTurns:p.maxConcurrentTurns}))}:{}),evidence:q.evidence,recordedAt:NOW()};}
+        const productiveQualification=patch.productiveConcurrencyQualification??this.policy.productiveConcurrencyQualification;
+        const productiveLimit=patch.maxProductiveTurns??this.policy.maxProductiveTurns??1;
+        if(productiveLimit>1&&((patch.maxInference??this.policy.maxInference)<productiveLimit||!productiveQualification?.passed||!productiveQualification?.artifactIdentity||!productiveQualification?.evidence||productiveLimit>(productiveQualification.mode==='local-remotes'?productiveQualification.stableMaxProductiveTurns:2)))throw new DomainError('qualification_required','Productive concurrency requires explicit pinned evidence at this level and enough inference slots');
         return this.update('policy',this.policy.id,patch);
       }
       case 'product.assess':
@@ -272,7 +332,10 @@ export class CompanyStore {
         const managerId = c.managerId ?? (actor.kind === 'employee' ? actor.employeeId : undefined);
         if (!managerId || !['ceo','executive','lead'].includes(this.level(managerId))) throw new DomainError('invalid_manager','A department needs active executive or lead responsibility');
         if (actor.kind !== 'owner' && actor.employeeId !== managerId) this.manager(actor,managerId);
-        return this.put('departments',{name:required(c.name,'Name'),managerId,responsibilities:required(c.responsibilities,'Responsibilities')});
+        const name=required(c.name,'Name'),responsibilities=required(c.responsibilities,'Responsibilities'),normalized=(value:string)=>value.normalize('NFKC').trim().replace(/\s+/g,' ').toLowerCase();
+        const existing=this.list('departments').find(d=>d.status!=='retired'&&normalized(d.name)===normalized(name));
+        if(existing)throw new DomainError('department_exists',`Department already exists (${existing.id}). Read the existing department and use department.update through its responsible management; creation does not change its manager or remit.`,409);
+        return this.put('departments',{name,managerId,responsibilities});
       }
       case 'position.create': {
         this.requireLevel(actor,['ceo','executive','lead','manager']);
@@ -292,7 +355,7 @@ export class CompanyStore {
         if (position.departmentId) { const department=this.need('departments',position.departmentId); if (actor.kind!=='owner' && department.managerId!==actor.employeeId) this.manager(actor,department.managerId); }
         if (LEVEL[position.level] <= LEVEL[this.level(managerId)]) throw new DomainError('invalid_position','Staff position must report below its manager');
         this.localModel(required(c.modelId,'Local model'));
-        return this.hire(c,position.id,managerId,null);
+        return this.hire(c,position.id,managerId,null,actor.kind==='owner');
       }
       case 'employee.appoint': {
         const employee=this.need('employees',c.employeeId); this.manager(actor,employee.id);
@@ -393,7 +456,9 @@ export class CompanyStore {
         }
         const accepted=actor.kind==='owner' || employee.id===authorId || this.canManage(actor,employee.id);
         if(c.completionRequirements!==undefined&&(c.kind??'implementation')!=='implementation')throw new DomainError('invalid_completion_requirements','Structured completion requirements apply to implementation assignments');
-        const acceptance=this.acceptance(c.acceptance),completionRequirements=c.completionRequirements===undefined?undefined:this.assignmentRequirements(acceptance,c.completionRequirements);
+        const acceptance=this.acceptance(c.acceptance);
+        if(c.completionSource!==undefined){if(!['artifact','delivery'].includes(c.completionSource)||c.completionRequirements!==undefined||(c.kind??'implementation')!=='implementation')throw new DomainError('invalid_completion_requirements','Choose one explicit artifact or delivery source, or full requirements');c.completionRequirements=acceptance.map(criterion=>({criterion,source:c.completionSource}));}
+        const completionRequirements=c.completionRequirements===undefined?undefined:this.assignmentRequirements(acceptance,c.completionRequirements);
         if(completionRequirements&&actor.kind==='employee'){this.requireLevel(actor,['ceo','executive','lead','manager']);if(this.need('assignments',this.need('runs',actor.runId).assignmentId).kind==='review')throw new DomainError('requirements_manager_required','Review assignments cannot declare completion requirements',403);}
         return this.put('assignments',{projectId:c.projectId ?? null,employeeId:employee.id,supervisorId,title:required(c.title,'Title'),instructions:required(c.instructions,'Instructions'),acceptance,dependencies,status:'queued',priority:finite(c.priority,0),attempts:0,corrections:0,kind:c.kind ?? 'implementation',availableAt:NOW(),accepted,payload:c.payload ?? {},...(completionRequirements?{completionRequirements,requirementsDeclaration:{actorId:authorId,runId:actor.kind==='employee'?actor.runId:null,at:NOW(),rationale:required(c.rationale,'Completion requirement rationale')}}:{})});
       }
@@ -420,9 +485,10 @@ export class CompanyStore {
       case 'decision.override': {
         if (actor.kind!=='owner') throw new DomainError('owner_required','Only Owner may override governance',403);
         const decision=this.need('decisions',c.decisionId);
-        if (!['pending','rejected'].includes(decision.status)) throw new DomainError('closed_decision','Decision has already been applied or superseded');
-        if (c.approve) this.applyGovernance(decision.id);
-        return this.update('decisions',decision.id,{status:c.approve?'approved':'rejected',override:{actorId:'owner',rationale:required(c.rationale,'Rationale')}});
+        if (!['pending','rejected'].includes(decision.status)&&!(decision.status==='approved'&&decision.application?.status==='blocked')) throw new DomainError('closed_decision','Decision has already been applied or superseded');
+        if(typeof c.approve!=='boolean')throw new DomainError('invalid_vote','Owner override approve must be boolean');
+        const rationale=required(c.rationale,'Rationale'),application=c.approve?this.attemptGovernance(decision.id):{status:'cancelled',at:NOW(),reason:'Owner explicitly declined application'};
+        return this.update('decisions',decision.id,{status:c.approve?'approved':'rejected',application,applicationHistory:[...(decision.applicationHistory??[]),application],override:{actorId:'owner',rationale},overrideHistory:[...(decision.overrideHistory??[]),{actorId:'owner',rationale,approve:c.approve,at:NOW()}]});
       }
       case 'artifact.record': {
         if (actor.kind==='owner') throw new DomainError('employee_run_required','Artifacts must be attributed to the employee run that produced them');
@@ -442,7 +508,7 @@ export class CompanyStore {
       case 'role.update': {
         this.manager(actor,c.employeeId); const employee=this.need('employees',c.employeeId);
         const content=required(c.content,'Role instructions');
-        const role=this.put('roleVersions',{employeeId:employee.id,version:employee.roleVersion+1,content,source:required(c.source,'Source evidence'),rationale:required(c.rationale,'Rationale'),authorId});
+        const role=this.put('roleVersions',{employeeId:employee.id,version:employee.roleVersion+1,content,source:required(c.source,'Source evidence'),rationale:required(c.rationale,'Rationale'),authorId,runId:actor.kind==='employee'?actor.runId:null});
         this.update('employees',employee.id,{role:content,roleVersion:role.version}); return role;
       }
       case 'experience.record': {
@@ -452,6 +518,11 @@ export class CompanyStore {
         return this.put('experiences',{employeeId,runId:actor.kind==='employee'?actor.runId:null,summary:required(c.summary,'What happened'),source:required(c.source,'Source'),modelId:c.modelId ?? this.need('employees',employeeId).modelId,environment:c.environment ?? '',learned:required(c.learned,'What should change'),authorId});
       }
       case 'knowledge.write': return this.vault.write({...c,generated:false,authorId,runId:actor.kind==='employee'?actor.runId:null});
+      case 'attention.acknowledge': {
+        if(actor.kind!=='owner')throw new DomainError('owner_required','Only the Owner can acknowledge receiving a request',403);
+        const attention=this.need('attention',c.attentionId);
+        return this.update('attention',attention.id,{userActionAt:NOW(),notification:{...attention.notification,status:'acknowledged',acknowledgedAt:NOW()}});
+      }
       case 'attention.resolve': {
         if (actor.kind!=='owner') throw new DomainError('owner_required','Owner prerequisites may only be marked resolved by Owner',403);
         return this.update('attention',c.attentionId,{status:'resolved',resolution:required(c.resolution,'Resolution')});
@@ -484,13 +555,15 @@ export class CompanyStore {
     for(const id of value)visit(id);
     return [...value];
   }
-  private hire(c: CorporateCommand, positionId: string, managerId: string | null, decisionId: string | null): Employee {
+  private hire(c: CorporateCommand, positionId: string, managerId: string | null, decisionId: string | null, ownerDirected=false): Employee {
     const position=this.need('positions',positionId);
+    ownerDirected=ownerDirected||!!decisionId&&this.need('decisions',decisionId).authorId==='owner';
+    const roleAuthorship=ownerDirected?{authorId:'owner',runId:null,at:NOW(),basis:'Owner-directed appointment',...(decisionId?{decisionId}:{})}:undefined;
     if (this.list('appointments').some(a=>a.positionId===positionId && !a.endedAt)) throw new DomainError('occupied_position','Position already has an active appointment');
-    const employee=this.put('employees',{name:required(c.name,'Name'),badge:`OC-${String(this.list('employees').length+1).padStart(4,'0')}`,status:'active',positionId,departmentId:position.departmentId,homeManagerId:managerId,modelId:required(c.modelId,'Model'),role:c.role ?? position.responsibilities,roleVersion:1});
+    const employee=this.put('employees',{name:required(c.name,'Name'),badge:`OC-${String(this.list('employees').length+1).padStart(4,'0')}`,status:'active',positionId,departmentId:position.departmentId,homeManagerId:managerId,modelId:required(c.modelId,'Model'),role:c.role ?? position.responsibilities,roleVersion:1,...(roleAuthorship?{roleAuthorship}:{})});
     this.reporting(employee.id,managerId);
     this.put('appointments',{employeeId:employee.id,positionId,startedAt:NOW(),endedAt:null,decisionId,acting:Boolean(c.acting)});
-    this.put('roleVersions',{employeeId:employee.id,version:1,content:employee.role,source:c.source ?? 'Leadership appointment',authorId:decisionId ?? managerId ?? 'owner'});
+    this.put('roleVersions',{employeeId:employee.id,version:1,content:employee.role,source:c.source ?? (ownerDirected?'Owner-directed appointment':'Leadership appointment'),authorId:ownerDirected?'owner':decisionId ?? managerId ?? 'owner',...(ownerDirected?{runId:null,...(decisionId?{decisionId}:{})}:{})});
     return employee;
   }
   private appoint(employeeId: string, positionId: string, managerId: string | null, decisionId: string | null, acting=false): Employee {
@@ -584,10 +657,23 @@ export class CompanyStore {
     const vote=this.put('votes',{decisionId:decision.id,employeeId:actor.employeeId,approve:c.approve,rationale:required(c.rationale,'Independent rationale'),runId:actor.runId,phase:'initial'});
     const votes=this.list('votes').filter(v=>v.decisionId===decision.id);
     // Wait for all three initial judgments, so even the outcome cannot prejudice an initial vote.
-    if (votes.length===3) { const approved=votes.filter(v=>v.approve).length>=2; if (approved) this.applyGovernance(decision.id); this.update('decisions',decision.id,{status:approved?'approved':'rejected',result:{approve:votes.filter(v=>v.approve).length,reject:votes.filter(v=>!v.approve).length}}); }
+    if (votes.length===3) {
+      const approved=votes.filter(v=>v.approve).length>=2,application=approved?this.attemptGovernance(decision.id):undefined;
+      this.update('decisions',decision.id,{status:approved?'approved':'rejected',result:{approve:votes.filter(v=>v.approve).length,reject:votes.filter(v=>!v.approve).length},...(application?{application,applicationHistory:[...(decision.applicationHistory??[]),application]}:{})});
+    }
     const assignment=this.need('assignments',this.need('runs',actor.runId).assignmentId);
     if(assignment.kind==='governance'&&assignment.payload?.decisionId===decision.id)this.update('assignments',assignment.id,{status:'completed',completedAt:NOW(),completionEvidence:{voteId:vote.id,runId:actor.runId}});
     return vote;
+  }
+  /** Domain failures roll back application effects, not the independent judgments. */
+  private attemptGovernance(decisionId:string){
+    try{
+      this.db.transaction(()=>this.applyGovernance(decisionId))();
+      return {status:'applied',at:NOW()};
+    }catch(error){
+      if(!(error instanceof DomainError))throw error;
+      return {status:'blocked',code:error.code,message:error.message,at:NOW()};
+    }
   }
   private applyGovernance(decisionId: string) {
     const decision=this.need('decisions',decisionId), p=decision.payload;
@@ -803,23 +889,38 @@ export class CompanyStore {
     }).immediate();
   }
 
+  providerBackoff():ProviderBackoff|undefined { return this.company.openRouterBackoff??undefined; }
+  recordProviderBackoff(value:ProviderBackoff|undefined){
+    if(!value){this.update('company',this.company.id,{openRouterBackoff:null});this.emit('inference.provider_cooldown_cleared',{provider:'openrouter',reason:'Successful response after cooldown'});return;}
+    if(value.provider!=='openrouter'||value.status!==429||!validOpenRouterFreeId(value.modelId))throw new Error('Invalid provider cooldown observation');
+    this.update('company',this.company.id,{openRouterBackoff:value});
+    this.emit('inference.provider_cooldown',value);
+  }
+  modelDispatchAllowed(modelId:string):boolean { const cooldown=this.providerBackoff();return !validOpenRouterFreeId(modelId)||!cooldown||Date.parse(cooldown.retryAt)<=Date.now(); }
   claimNext(options: {workspace?: string; leaseMs?: number; assignmentId?: string} = {}): EmployeeRun | undefined {
     return this.db.transaction(() => {
       if (this.company.state!=='running') return undefined;
       this.reconcileReviewScopes();
       if (this.list('runs').filter(r=>r.status==='running'||r.status==='cancelling').length>=this.policy.maxInference) return undefined;
       const assignments=this.list('assignments');
-      const ready=assignments.filter(a=>a.status==='queued'&&a.accepted!==false&&!this.reviewScopeIssue(a)&&this.reviewScopeCorrectionAllowed(a)&&(!a.projectId||this.need('projects',a.projectId).status==='active'&&projectDispatchAllowed(this.need('projects',a.projectId),a))&&a.availableAt<=NOW()&&(!options.assignmentId||a.id===options.assignmentId)&&this.need('employees',a.employeeId).status==='active'&&a.dependencies.every(id=>{const dependency=this.get('assignments',id);return !!dependency&&this.assignmentCompleted(dependency);}));
+      const ready=assignments.filter(a=>a.status==='queued'&&a.accepted!==false&&a.availableAt<=NOW()&&(!options.assignmentId||a.id===options.assignmentId)&&this.modelDispatchAllowed(a.kind==='social'&&a.payload?.modelId?a.payload.modelId:this.need('employees',a.employeeId).modelId)&&!this.reviewScopeIssue(a)&&this.reviewScopeCorrectionAllowed(a)&&(!a.projectId||this.need('projects',a.projectId).status==='active'&&projectDispatchAllowed(this.need('projects',a.projectId),a))&&(a.kind!=='social'||socialDispatchAllowed(this,a.id))&&this.need('employees',a.employeeId).status==='active'&&a.dependencies.every(id=>{const dependency=this.get('assignments',id);return !!dependency&&this.assignmentCompleted(dependency);}));
       ready.sort((a,b)=>(b.priority+Math.floor((Date.now()-Date.parse(b.createdAt))/3_600_000))-(a.priority+Math.floor((Date.now()-Date.parse(a.createdAt))/3_600_000))||a.createdAt.localeCompare(b.createdAt));
       const assignment=ready[0]; if (!assignment) return undefined;
       const employee=this.need('employees',assignment.employeeId);
-      this.localModel(employee.modelId);
-      if (this.list('runs').some(r=>r.employeeId===employee.id&&!TERMINAL.has(r.status))) return undefined;
+      const modelId=assignment.kind==='social'&&assignment.payload?.modelId?assignment.payload.modelId:employee.modelId;
+      this.localModel(modelId);
+      if(assignment.kind==='social'&&this.list('models').some(m=>m.id===modelId&&m.local===false))throw new DomainError('hosted_inference_denied','Workplace social turns require local models',403);
+      if (this.list('runs').some(r=>!TERMINAL.has(r.status)&&(r.employeeId===employee.id||assignment.projectId&&this.need('assignments',r.assignmentId).projectId===assignment.projectId))) return undefined;
       const activeRuns=this.list('runs').filter(r=>r.status==='running'||r.status==='cancelling');
-      const selected=this.list('models').find(m=>m.id===employee.modelId||m.name===employee.modelId);
-      if (activeRuns.length && selected?.sizeClass!=='small' && activeRuns.some(r=>this.list('models').find(m=>m.id===r.modelId||m.name===r.modelId)?.sizeClass!=='small')) return undefined;
-      const run=this.put('runs',{employeeId:employee.id,assignmentId:assignment.id,modelId:employee.modelId,policyRevision:this.policy.revision,workspace:options.workspace ?? (assignment.projectId?this.need('projects',assignment.projectId).workspace ?? null:null),sessionId:null,runtimeDispatch:'claimed',status:'running',attempt:assignment.attempts+1,leaseUntil:new Date(Date.now()+(options.leaseMs ?? 120_000)).toISOString(),heartbeatAt:NOW(),tokenRevoked:false});
-      this.update('assignments',assignment.id,{status:'running',attempts:run.attempt});
+      const small=(id:string)=>{const m=this.list('models').find(m=>m.id===id||m.name===id);return m?.sizeClass==='small'||m?.sizeClass==='micro'||typeof m?.size==='number'&&m.size<5_000_000_000;};
+      const qualification=this.policy.productiveConcurrencyQualification,productive=activeRuns.filter(r=>this.need('assignments',r.assignmentId).kind!=='social');
+      const identity=(id:string)=>this.list('models').find(m=>m.id===id||m.name===id)?.artifactIdentity;
+      const selected=(id:string)=>{const model=this.list('models').find(m=>m.id===id||m.name===id);return model&&(model.local||permittedPooledModel(this.policy,model)||permittedOpenRouterFreeModel(this.policy,model)||permittedDirectFreeModel(this.policy,model))?model:undefined;};
+      const sharing=assignment.kind!=='social'&&qualification?.passed&&qualification?.evidence&&productiveSharingAllowed(selected(modelId),productive.map(r=>selected(r.modelId)),{maxProductiveTurns:this.policy.maxProductiveTurns,productiveArtifactIdentity:qualification.artifactIdentity,...(qualification.mode==='local-remote'?{productiveRemoteModelId:qualification.remoteModelId,productiveRemoteArtifactIdentity:qualification.remoteArtifactIdentity}:qualification.mode==='local-remotes'?{productiveRemoteProfiles:qualification.remoteProfiles,productiveProviderCaps:qualification.providerCaps}:{})});
+      if(assignment.kind!=='social'&&productive.length&&!sharing)return undefined;
+      if(activeRuns.length&&!small(modelId)&&activeRuns.some(r=>!small(r.modelId))&&(!sharing||activeRuns.some(r=>!small(r.modelId)&&identity(r.modelId)!==qualification.artifactIdentity)))return undefined;
+      const run=this.put('runs',{employeeId:employee.id,assignmentId:assignment.id,modelId,policyRevision:this.policy.revision,workspace:options.workspace ?? (assignment.projectId?this.need('projects',assignment.projectId).workspace ?? null:null),sessionId:null,runtimeDispatch:'claimed',status:'running',attempt:assignment.attempts+1,leaseUntil:new Date(Date.now()+(options.leaseMs ?? 120_000)).toISOString(),heartbeatAt:NOW(),tokenRevoked:false});
+      this.update('assignments',assignment.id,{status:'running',attempts:run.attempt,...(assignment.resourceWait?{resourceWait:null}:{})});
       this.emit('run.claimed',{runId:run.id,assignmentId:assignment.id}); return run;
     }).immediate();
   }
@@ -836,7 +937,8 @@ export class CompanyStore {
         if (status==='succeeded') {
           // Management/conversation/governance persist their commands. Implementation needs an artifact and independent review.
           const artifact=this.list('artifacts').filter(a=>a.assignmentId===assignment.id).at(-1);
-          if(assignment.kind==='implementation'&&artifact&&(artifact.runId===run.id||artifact.verification?.passed&&artifact.verification.runId===run.id&&artifact.verification.identity===artifact.identity))this.update('assignments',assignment.id,{status:'awaiting_review'});
+          if(assignment.kind==='social'){const message=this.list('messages').find(m=>m.runId===run.id&&m.senderId===run.employeeId&&m.eventId===assignment.payload?.eventId&&m.occurrence===assignment.payload?.occurrence);this.update('assignments',assignment.id,message?{status:'completed',completedAt:NOW(),messageId:message.id}:{status:'blocked',blockedReason:'Social run ended without its actual attributed workplace message'});}
+          else if(assignment.kind==='implementation'&&artifact&&(artifact.runId===run.id||artifact.verification?.passed&&artifact.verification.runId===run.id&&artifact.verification.identity===artifact.identity))this.update('assignments',assignment.id,{status:'awaiting_review'});
           else if (['management','conversation','governance','assessment'].includes(assignment.kind) && ((run.corporateCommands?.length ?? 0)>0 || result.managementResult?.summary)) this.update('assignments',assignment.id,{status:'completed',completedAt:NOW()});
           else this.update('assignments',assignment.id,{status:'blocked',blockedReason:'Run ended without a submitted artifact; management must inspect preserved workspace'});
         } else if (status==='interrupted' && this.need('employees',assignment.employeeId).status==='active') this.update('assignments',assignment.id,{status:'queued',availableAt:NOW(),resumeRunId:run.id});

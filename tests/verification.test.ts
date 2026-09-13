@@ -27,3 +27,8 @@ test('OpenJob merge verification uses the actual immutable base and rejects miss
   expect(() => canonicalVerification('OpenJob', '/owned/workspace')).toThrow(/recorded project base/);
   expect(() => canonicalVerification('OpenJob', '/owned/workspace', 'main; touch /tmp/escape')).toThrow(/recorded project base/);
 });
+
+test('registered company verifier supports executable internal tools without a product-name switch',()=>{
+ expect(canonicalVerification('Useful local helper','/owned/workspace',undefined,'node --test tests/*.test.mjs')).toBe('node --test tests/*.test.mjs');
+ expect(()=>canonicalVerification('Useful local helper','/owned/workspace',undefined,'')).toThrow(/nonempty/);
+});

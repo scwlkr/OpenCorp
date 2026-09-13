@@ -1,10 +1,14 @@
+import { migrate } from '../src/storage/schema.js';
+import Database from 'better-sqlite3';
+import { selectLocalModel } from '../src/runtime/ollama.js';
+import type { LocalModel } from '../src/runtime/types.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { CompanyStore } from '../src/storage/store.js';
-import { checkpointFinalResponseEligible, checkpointFinalResponseReady, managementOutcome, Scheduler } from '../src/scheduler/scheduler.js';
+import { corporateOnlyFormation, checkpointFinalResponseEligible, checkpointFinalResponseReady, governanceDispatchAllowed, managementOutcome, Scheduler } from '../src/scheduler/scheduler.js';
 import { CorporateBroker } from '../src/tools/broker.js';
 import type { LocalRuntime } from '../src/runtime/index.js';
 import { RuntimeExecutionError, type RuntimeResult } from '../src/runtime/types.js';
@@ -18,6 +22,38 @@ beforeEach(()=>{
   const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
   assignment=store.command(owner,{type:'assignment.create',employeeId:ceo.id,supervisorId:ceo.id,title:'Assess actual company state',instructions:'Choose useful work',acceptance:['Persist concrete decisions'],kind:'management'});
   run=store.put('runs',{employeeId:ceo.id,assignmentId:assignment.id,modelId:model,policyRevision:store.policy.revision,workspace:root,sessionId:'session',status:'running',attempt:1,leaseUntil:new Date(Date.now()+60000).toISOString(),heartbeatAt:new Date().toISOString(),tokenRevoked:false});actor={kind:'employee',employeeId:ceo.id,runId:run.id,policyRevision:store.policy.revision};
+});
+
+describe('unchanged organization reconciliation',()=>{
+ let scheduler:Scheduler;
+ const availability=vi.fn(async()=>undefined);
+ beforeEach(()=>{
+  availability.mockClear();
+  scheduler=new Scheduler(store,{status:()=>({inferenceSlots:0}),providerAvailability:availability} as unknown as LocalRuntime,{} as CorporateBroker,'http://broker.invalid');
+  Object.assign(scheduler,{initialized:true,recoveryComplete:true});
+ });
+ it('keeps dispatch checks live and rechecks writes, elapsed time and clock rollback',async()=>{
+  let now=Date.now();const clock=vi.spyOn(Date,'now').mockImplementation(()=>now),reconcile=vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});
+  try{
+   await scheduler.tick();now+=1000;await scheduler.tick();expect(reconcile).toHaveBeenCalledTimes(1);expect(availability).toHaveBeenCalledTimes(2);
+   store.update('assignments',assignment.id,{title:'Changed local obligation'});await scheduler.tick();expect(reconcile).toHaveBeenCalledTimes(2);
+   const external=new Database(join(root,'company.sqlite'));
+   try{external.prepare("UPDATE assignments SET data=json_set(data,'$.title',?) WHERE id=?").run('Changed external obligation',assignment.id);}finally{external.close();}
+   await scheduler.tick();expect(reconcile).toHaveBeenCalledTimes(3);
+   now+=4999;await scheduler.tick();expect(reconcile).toHaveBeenCalledTimes(3);
+   now++;await scheduler.tick();expect(reconcile).toHaveBeenCalledTimes(4);
+   now--;await scheduler.tick();expect(reconcile).toHaveBeenCalledTimes(5);
+  }finally{clock.mockRestore();}
+ });
+ it('follows through on its own writes and never marks a failed pass reconciled',async()=>{
+  const reconcile=vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});
+  reconcile.mockImplementationOnce(()=>{store.update('assignments',assignment.id,{title:'Next phase must observe this'});});
+  await scheduler.tick();await scheduler.tick();await scheduler.tick();expect(reconcile).toHaveBeenCalledTimes(2);
+  store.update('assignments',assignment.id,{title:'Changed obligation before failure'});
+  reconcile.mockImplementationOnce(()=>{throw new Error('Synthetic reconciliation failure');});
+  await scheduler.tick();await scheduler.tick();expect(reconcile).toHaveBeenCalledTimes(4);
+  expect(store.list('attention').some(item=>item.detail.includes('Synthetic reconciliation failure'))).toBe(true);
+ });
 });
 
 describe('trusted checkpoint final-response eligibility',()=>{
@@ -39,7 +75,83 @@ describe('trusted checkpoint final-response eligibility',()=>{
   });
 });
 
+describe('candidate final-response checkpoint',()=>{
+ it('requires a trusted candidate phase and leaves partial multi-action formation stages excluded',()=>{
+  const candidate={...assignment,kind:'management',projectId:null,schedulerKey:'formation:candidate:req:0',payload:{formation:true}} as Assignment;
+  expect(checkpointFinalResponseEligible(candidate)).toBe(true);
+  for(const patch of [{kind:'implementation'},{projectId:'project'},{payload:{}},{schedulerKey:'formation:candidate:req'},{schedulerKey:'formation:candidate:req:invalid'},...['request:position:manager','provision:candidate','onboard:employee','recruiter-bootstrap','office:Chief Product Officer','department:Web Engineering'].map(key=>({schedulerKey:`formation:${key}`}))])expect(checkpointFinalResponseEligible({...candidate,...patch} as Assignment)).toBe(false);
+ });
+ it('uses only retained candidate evidence from this exact assignment, including a resumed attempt',()=>{
+  assignment=store.update('assignments',assignment.id,{status:'running',schedulerKey:'formation:candidate:req:0',payload:{formation:true}});
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+  const unrelated=store.put('runs',{...run,id:undefined,assignmentId:'other-assignment',sessionId:randomUUID(),status:'interrupted'});
+  const candidate=store.put('experiences',{kind:'candidate',requisitionId:'req',status:'proposed',authorship:{runId:unrelated.id}});
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+  store.update('experiences',candidate.id,{authorship:{runId:run.id}});
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(true);
+  store.update('runs',run.id,{status:'interrupted',tokenRevoked:true});
+  const resumed=store.put('runs',{...run,id:undefined,sessionId:randomUUID(),status:'running',tokenRevoked:false});
+  expect(checkpointFinalResponseReady(store,assignment,resumed.id)).toBe(true);
+  store.update('experiences',candidate.id,{status:'changes_requested'});
+  expect(checkpointFinalResponseReady(store,assignment,resumed.id)).toBe(true);
+  const correction=store.put('assignments',{...assignment,id:undefined,schedulerKey:'formation:candidate:req:1'});
+  const correctionRun=store.put('runs',{...resumed,id:undefined,assignmentId:correction.id,sessionId:randomUUID()});
+  expect(checkpointFinalResponseReady(store,correction,correctionRun.id)).toBe(false);
+  store.update('assignments',assignment.id,{supervisorId:'changed'});
+  expect(checkpointFinalResponseReady(store,assignment,resumed.id)).toBe(false);
+  store.update('assignments',assignment.id,{supervisorId:assignment.supervisorId});
+  store.command(owner,{type:'control',action:'pause'});
+  expect(()=>checkpointFinalResponseReady(store,assignment,resumed.id)).toThrow();
+ });
+ it('passes the candidate predicate to runtime without completing an unfulfilled task',async()=>{
+  assignment=store.update('assignments',assignment.id,{status:'running',schedulerKey:'formation:candidate:req:0',payload:{formation:true}});
+  const execute=vi.fn(async(request:any)=>{expect(request.finalResponseCheckpoint()).toBe(false);throw new Error('Fixture stops before inference');});
+  await (new Scheduler(store,{execute} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost') as any).execute(run);
+  expect(execute).toHaveBeenCalledOnce();expect(store.need('assignments',assignment.id).status).not.toBe('completed');
+ });
+});
+
+describe('corporate-only formation dispatch',()=>{
+ it('selects only known company formation phases with the trusted marker',()=>{
+  for(const key of ['office:Chief Product Officer','department:Web Engineering','recruiter-bootstrap','request:position','candidate:req:0','approve:candidate:1','provision:candidate','onboard:employee']){
+   store.update('assignments',assignment.id,{kind:'management',projectId:null,schedulerKey:`formation:${key}`,payload:{formation:true}});expect(corporateOnlyFormation(store,run)).toBe(true);
+  }
+  const valid={kind:'management',projectId:null,schedulerKey:'formation:recruiter-bootstrap',payload:{formation:true}};
+  for(const patch of [{kind:'implementation'},{projectId:'product-project'},{payload:{}},{schedulerKey:'formation:unknown:fixture'},{schedulerKey:'duty:department:0'}]){
+   store.update('assignments',assignment.id,{...valid,...patch});expect(corporateOnlyFormation(store,run)).toBe(false);
+  }
+ });
+ it('includes only trusted faults whose original assignment is corporate formation',async()=>{
+  store.update('assignments',assignment.id,{schedulerKey:'formation:recruiter-bootstrap',payload:{formation:true},status:'blocked'});store.update('runs',run.id,{status:'failed'});
+  const diagnosis=store.command(owner,{type:'assignment.create',employeeId:run.employeeId,title:'Diagnose formation',instructions:'Inspect retained records',acceptance:['Correct original'],kind:'management'});
+  store.update('assignments',diagnosis.id,{schedulerKey:`fault:${run.id}`,payload:{failedRunId:run.id,failedAssignmentId:assignment.id}});
+  const diagnosticRun=store.put('runs',{...run,id:undefined,sessionId:randomUUID(),assignmentId:diagnosis.id,status:'running'});
+  expect(corporateOnlyFormation(store,diagnosticRun)).toBe(true);
+  const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture stops at runtime dispatch');}),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
+  await (scheduler as any).execute(diagnosticRun);expect(execute.mock.calls[0][0].corporateOnly).toBe(true);expect(execute.mock.calls[0][0].prompt).toContain('inspect retained corporate records and source-inspection receipts');expect(execute.mock.calls[0][0].prompt).not.toContain('inspect preserved files');
+  store.update('assignments',assignment.id,{projectId:'product-project'});expect(corporateOnlyFormation(store,diagnosticRun)).toBe(false);
+  store.update('assignments',assignment.id,{projectId:null});store.update('assignments',diagnosis.id,{payload:{failedRunId:run.id,failedAssignmentId:'wrong-target'}});expect(corporateOnlyFormation(store,diagnosticRun)).toBe(false);
+ });
+ it.each([true,false])('passes corporate-only selection %s and the matching interruption guidance to runtime',async enabled=>{
+  if(enabled)store.update('assignments',assignment.id,{schedulerKey:'formation:recruiter-bootstrap',payload:{formation:true}});
+  const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture stops at runtime dispatch');}),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
+  await (scheduler as any).execute(store.need('runs',run.id));const request=execute.mock.calls[0][0];
+  expect(request.corporateOnly).toBe(enabled?true:undefined);
+  expect(request.prompt.includes('Use the retained formation records above')).toBe(enabled);expect(request.prompt.includes('inspect preserved files')).toBe(!enabled);
+ });
+});
+
 describe('durable dispatch boundaries',()=>{
+  it('uses the tailored expansion role and selected references without a generic hierarchy seed',async()=>{
+    store.command(owner,{type:'company.expand',mandate:'Form specialist departments through actual recruitment'});
+    store.update('employees',run.employeeId,{role:'Own tailored workforce competency adaptation and onboarding.',competencies:['candidate adaptation'],sourceIds:['pinned-recruitment-source']});
+    const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture stops at runtime dispatch');}),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
+    await (scheduler as any).execute(store.need('runs',run.id));
+    const system=execute.mock.calls[0][0].system;expect(system).toContain('Own tailored workforce competency adaptation and onboarding.');expect(system).toContain(`Current run ID: ${run.id}.`);
+    const seed=system.split('Relevant competency seed (authority remains above):')[1];expect(seed).toContain('pinned-recruitment-source');expect(seed).toContain('candidate adaptation');expect(seed).not.toContain('#');
+    const legacyStyleHire=store.update('employees',run.employeeId,{sourceIds:undefined,roleAuthorship:undefined});expect((scheduler as any).roleSeed(legacyStyleHire)).toContain('Use the retained role above');
+  });
+
   it.each([
     ['Acknowledge this controls check only.','Acknowledged.'],
     ['Explain which artifacts support the current project result.','No artifacts have been recorded in this fixture; there is no completed product outcome to report.'],
@@ -184,8 +296,9 @@ describe('artifact-scoped delivery governance',()=>{
 const outcome=()=>managementOutcome(store,store.need('assignments',assignment.id),store.need('runs',run.id));
 
 describe('management completion requires actual outcomes',()=>{
-  it.each(['revised proposal','withdrawal'])('routes a rejected appointment once and requires an evidenced current-run %s',correctionKind=>{
-    const position=store.command(actor,{type:'position.create',title:'Product executive',level:'executive',responsibilities:'Own useful product delivery'}),proposal={positionId:position.id,name:'Proposed executive',modelId:model,role:'Initial delivery scope'};
+  it.each(['revised proposal','withdrawal','replacement pending','replacement approved','replacement rejected'])('routes a rejected appointment once and requires an evidenced current-run %s',correctionKind=>{
+    store.command(owner,{type:'company.expand',mandate:'Form governed specialized departments'});
+    const position=store.command(actor,{type:'position.create',title:'Chief Technology Officer',level:'executive',responsibilities:'Own useful product delivery'}),proposal={positionId:position.id,name:'Proposed executive',modelId:model,role:'Initial delivery scope'};
     const decision=store.command(actor,{type:'decision.create',kind:'executive.appoint',subject:'Initial executive appointment',rationale:'Concrete delivery ownership',payload:proposal});
     const scheduler=new Scheduler(store,{} as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
     for(const elder of store.list('employees').filter(e=>store.level(e.id)==='elder')){
@@ -193,14 +306,21 @@ describe('management completion requires actual outcomes',()=>{
       store.command({kind:'employee',employeeId:elder.id,runId:voteRun.id,policyRevision:store.policy.revision},{type:'decision.vote',decisionId:decision.id,approve:false,rationale:`Independent objection from ${elder.id}: scope needs actual delivery evidence`});
     }
     (scheduler as any).reconcileOrganization();(scheduler as any).reconcileOrganization();
+    expect(store.list('assignments').filter(a=>a.schedulerKey?.startsWith('formation:office:Chief Technology Officer'))).toHaveLength(0);
     const followups=store.list('assignments').filter(a=>a.schedulerKey===`appointment-rejected:${decision.id}`);expect(followups).toHaveLength(1);const followup=followups[0],voteIds=store.list('votes').filter(v=>v.decisionId===decision.id).map(v=>v.id);
     expect(followup).toMatchObject({employeeId:run.employeeId,projectId:null,status:'queued',payload:{rejectedDecisionId:decision.id,voteIds}});expect(followup.instructions).toContain(decision.id);for(const id of voteIds)expect(followup.instructions).toContain(id);
     const correctionRun=store.put('runs',{...run,id:undefined,assignmentId:followup.id,sessionId:randomUUID(),text:'The staffing issue is resolved.'}),correctionActor:Actor={kind:'employee',employeeId:run.employeeId,runId:correctionRun.id,policyRevision:store.policy.revision},result=()=>managementOutcome(store,followup,store.need('runs',correctionRun.id));
     expect(result().passed).toBe(false);store.command(correctionActor,{type:'product.assess',productId:store.list('products')[0].id,assessment:'Updated product evidence',rationale:'Unrelated assessment cannot complete governance correction'});expect(result().passed).toBe(false);
-    const payload={...(correctionKind==='withdrawal'?{disposition:'withdrawn'}:proposal),rejectedDecisionId:decision.id},kind=correctionKind==='withdrawal'?'strategy':'executive.appoint';
+    const payload={...(correctionKind==='withdrawal'?{disposition:'withdrawn'}:proposal),rejectedDecisionId:decision.id},kind=correctionKind==='withdrawal'?'strategy':correctionKind.startsWith('replacement')?'executive.replace':'executive.appoint';
     store.command(correctionActor,{type:'decision.create',kind,subject:'Unlinked response',rationale:'No finalized vote evidence linked yet',payload});expect(result().passed).toBe(false);
-    store.command(correctionActor,{type:'decision.create',kind,subject:'Evidence-based staffing correction',rationale:'Address the retained scope objections with concrete product evidence',payload:{...payload,reviewedVoteIds:voteIds}});expect(result().passed).toBe(true);
+    store.command(actor,{type:'decision.create',kind,subject:'Foreign-run linked correction',rationale:'A different assignment cannot satisfy this correction',payload:{...payload,reviewedVoteIds:voteIds}});expect(result().passed).toBe(false);
+    const corrected=store.command(correctionActor,{type:'decision.create',kind,subject:'Evidence-based staffing correction',rationale:'Address the retained scope objections with concrete product evidence',payload:{...payload,reviewedVoteIds:voteIds}});if(correctionKind.startsWith('replacement'))store.update('decisions',corrected.id,{status:correctionKind.split(' ')[1]});expect(result().passed).toBe(true);
     store.update('assignments',followup.id,{status:'completed'});(scheduler as any).reconcileOrganization();expect(store.list('assignments').filter(a=>a.schedulerKey===followup.schedulerKey)).toHaveLength(1);expect(store.need('decisions',decision.id).status).toBe('rejected');expect(store.list('votes').filter(v=>v.decisionId===decision.id).map(v=>v.id)).toEqual(voteIds);
+    const remaining=store.list('assignments').filter(a=>a.schedulerKey?.startsWith('formation:office:Chief Technology Officer'));
+    if(correctionKind==='withdrawal'){
+      expect(remaining).toHaveLength(1);expect(remaining[0].status).toBe('queued');expect(remaining[0].instructions).toContain('Do not retry the withdrawn candidate unchanged');
+      (scheduler as any).reconcileOrganization();expect(store.list('assignments').filter(a=>a.schedulerKey===remaining[0].schedulerKey)).toHaveLength(1);
+    }else expect(remaining).toHaveLength(0);
   });
   it('returns a verified retained artifact to review after a verification-only implementation retry',()=>{
     store.update('assignments',assignment.id,{kind:'implementation',status:'running'});const artifact=store.put('artifacts',{assignmentId:assignment.id,employeeId:run.employeeId,runId:'prior-author-run',projectId:null,uri:'actual-commit',identity:'exact-head',kind:'commit',summary:'Retained implementation',checks:[]});
@@ -320,6 +440,7 @@ describe('bounded failure diagnosis',()=>{
     const scheduler=new Scheduler(store,{execute:async()=>{throw new RuntimeExecutionError('output_limit_exhausted','Local response allowance exhausted');}} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
     await (scheduler as any).execute(store.need('runs',run.id));(scheduler as any).reconcileOrganization();(scheduler as any).reconcileOrganization();
     const diagnoses=store.list('assignments').filter(a=>a.schedulerKey===`fault:${run.id}`);expect(diagnoses).toHaveLength(1);expect(diagnoses[0]).toMatchObject({employeeId:employee.id,kind:'management',priority:14,payload:{failedRunId:run.id,failedAssignmentId:assignment.id,baselineModelId:model}});expect(store.need('assignments',assignment.id).status).toBe('blocked');
+    expect(diagnoses[0].instructions).not.toContain('Local response allowance exhausted');expect(diagnoses[0].instructions).toContain(run.id);expect(store.need('runs',run.id).error).toContain('Local response allowance exhausted');
     expect(diagnoses[0].instructions).toContain('use create_assignment with direct');expect(diagnoses[0].instructions).toContain('prefer record_blocked_diagnosis with direct');
   });
   it('reconciles the latest blocked failure after a restart gap and does not diagnose a transient retry',()=>{
@@ -436,6 +557,13 @@ describe('artifact-specific delivery scheduling',()=>{
  it.each([undefined,{state:'prepared'}])('holds new publication while a new-style merged workspace advancement is %s',advance=>{
   const {project,artifact,old}=milestone();store.update('projects',project.id,{delivery:{...old,publicationActionId:'actual-publication',workspaceAdvance:advance}});const scheduler=new Scheduler(store,{} as LocalRuntime,new CorporateBroker(store,root),'http://localhost');(scheduler as any).reconcileOrganization();expect(store.list('assignments').some(item=>item.schedulerKey===`deliver:${artifact.id}`)).toBe(false);
  });
+ it('does not schedule GitHub publication for reviewed internal tools',()=>{
+  const {project,artifact}=milestone();store.update('products',project.productId,{kind:'internal-tool'});
+  const scheduler=new Scheduler(store,{} as LocalRuntime,new CorporateBroker(store,root),'http://localhost');(scheduler as any).reconcileOrganization();
+  expect(store.list('assignments').some(item=>item.schedulerKey===`deliver:${artifact.id}`)).toBe(false);
+  expect(store.hasApprovedArtifact(artifact.assignmentId,artifact.identity)).toBe(true);
+  expect(store.need('products',project.productId).adoption).toBeUndefined();
+ });
 });
 
 
@@ -485,4 +613,324 @@ describe('company-workspace diagnosis of held product advancement',()=>{
   const {project,failed,scheduler}=failedAdvancement();(scheduler as any).reconcileOrganization();const task=store.list('assignments').find(item=>item.schedulerKey===`fault:${failed.id}`)!;store.update('assignments',task.id,{projectId:project.id});
   (scheduler as any).reconcileOrganization();(scheduler as any).reconcileOrganization();expect(store.list('assignments').filter(item=>item.schedulerKey===task.schedulerKey)).toHaveLength(1);expect(store.need('assignments',task.id).projectId).toBeNull();expect(store.need('assignments',assignment.id).status).toBe('blocked');expect(store.list('actions')).toHaveLength(0);expect(store.list('assignments').filter(item=>item.projectId===project.id&&item.payload?.mergeReady)).toHaveLength(1);
  });
+});
+
+describe('blocked governance application follow-through',()=>{
+ it.each(['corrected proposal','withdrawal'])('queues one accountable correction and requires linked %s evidence',correctionKind=>{
+  const executive=store.need('employees',run.employeeId),payload={positionId:executive.positionId,name:'Additional CEO',modelId:model};
+  const decision=store.command(actor,{type:'decision.create',kind:'executive.appoint',subject:'Actual occupied office proposal',rationale:'Actual independently judged proposal',payload});
+  for(const elder of store.list('employees').filter(e=>store.level(e.id)==='elder')){
+   const task=store.command(owner,{type:'assignment.create',employeeId:elder.id,title:'Independent vote',instructions:'Judge proposal independently',acceptance:['Actual vote'],kind:'governance',payload:{decisionId:decision.id}});
+   const voteRun=store.put('runs',{...run,id:undefined,employeeId:elder.id,assignmentId:task.id,sessionId:randomUUID()});
+   store.command({kind:'employee',employeeId:elder.id,runId:voteRun.id,policyRevision:store.policy.revision},{type:'decision.vote',decisionId:decision.id,approve:true,rationale:'Independent majority judgment'});
+  }
+  const retained=store.need('decisions',decision.id),votes=store.list('votes'),scheduler=new Scheduler(store,{} as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
+  expect(retained).toMatchObject({status:'approved',application:{status:'blocked',code:'occupied_position'}});
+  const apply=vi.spyOn(store as any,'applyGovernance');(scheduler as any).reconcileOrganization();(scheduler as any).reconcileOrganization();
+  const tasks=store.list('assignments').filter(a=>a.schedulerKey===`governance-application:${decision.id}`);expect(tasks).toHaveLength(1);expect(apply).not.toHaveBeenCalled();
+  const task=tasks[0],correctionRun=store.put('runs',{...run,id:undefined,assignmentId:task.id,sessionId:randomUUID()}),correctionActor:Actor={kind:'employee',employeeId:run.employeeId,runId:correctionRun.id,policyRevision:store.policy.revision},check=()=>managementOutcome(store,task,store.need('runs',correctionRun.id));
+  expect(check().passed).toBe(false);
+  const voteIds=votes.filter(v=>v.decisionId===decision.id).map(v=>v.id);
+  const propose=(kind:string,extra:Record<string,unknown>)=>store.command(correctionActor,{type:'decision.create',kind,subject:'Correct the unapplied operation',rationale:'Preserve incumbent and existing governance; actual correction judgment',payload:extra});
+  propose('strategy',{disposition:'withdrawn'});expect(check().passed).toBe(false);
+  propose('executive.appoint',{...payload,sourceDecisionId:decision.id,reviewedVoteIds:voteIds});expect(check().passed).toBe(false);
+  if(correctionKind==='withdrawal')propose('strategy',{disposition:'withdrawn',sourceDecisionId:decision.id,reviewedVoteIds:voteIds});
+  else propose('executive.replace',{...payload,sourceDecisionId:decision.id,reviewedVoteIds:voteIds});
+  expect(check().passed).toBe(true);store.update('assignments',task.id,{status:'completed'});
+  const restarted=new Scheduler(store,{} as LocalRuntime,new CorporateBroker(store,root),'http://localhost');(restarted as any).reconcileOrganization();
+  expect(store.list('assignments').filter(a=>a.schedulerKey===task.schedulerKey)).toHaveLength(1);expect(apply).not.toHaveBeenCalled();expect(store.need('decisions',decision.id)).toEqual(retained);expect(store.list('votes')).toEqual(votes);
+ });
+});
+
+
+it('does not dispatch an application correction to an unvoted Elder after an Owner override',()=>{
+ const executive=store.need('employees',run.employeeId),decision=store.command(actor,{type:'decision.create',kind:'executive.appoint',subject:'Occupied office',rationale:'Actual proposed operation',payload:{positionId:executive.positionId,name:'Additional CEO',modelId:model}});
+ store.command(owner,{type:'decision.override',decisionId:decision.id,approve:true,rationale:'Explicit Owner judgment'});
+ const scheduler=new Scheduler(store,{} as LocalRuntime,new CorporateBroker(store,root),'http://localhost');(scheduler as any).reconcileOrganization();
+ const correction=store.list('assignments').find(a=>a.schedulerKey===`governance-application:${decision.id}`)!,elder=store.list('employees').find(e=>store.level(e.id)==='elder')!;
+ expect(governanceDispatchAllowed(store,correction)).toBe(true);expect(governanceDispatchAllowed(store,{...correction,employeeId:elder.id})).toBe(false);
+});
+
+describe('formation receipt-based ending instructions',()=>{
+ it.each([true,false])('explains ending while the actual bootstrap checkpoint enforces retained hire=%s',async hasHire=>{
+   store.command(owner,{type:'company.expand',mandate:'Resume real recruitment formation'});
+   const department=store.command(owner,{type:'department.create',name:'Recruitment & Workforce Planning',managerId:run.employeeId,responsibilities:'Scoped recruitment'});
+   const position=store.command(owner,{type:'position.create',title:'Recruitment Officer',level:'worker',departmentId:department.id,responsibilities:'Adapt narrow source competencies'});
+   if(hasHire)store.command(owner,{type:'employee.hire',name:'Retained recruiter',positionId:position.id,homeManagerId:run.employeeId,modelId:model,role:'Source and adapt competencies under managerial authority'});
+   assignment=store.update('assignments',assignment.id,{status:'running',schedulerKey:'formation:recruiter-bootstrap',instructions:'Bootstrap the Recruitment Officer using actual source adaptations and company tools.'});
+   const employeeCount=store.list('employees').length;
+   const result:RuntimeResult={sessionId:'session',text:`Recruitment Officer position ${position.id}: ${hasHire?'the existing hire is retained':'no hire is recorded'}.`,modelId:model,artifactIdentity:'fixture-local-model',usage:{inputTokens:20,outputTokens:10,requests:1,durationMs:10},messagesPath:join(root,'fixture-messages.json'),diagnosticsPath:join(root,'fixture-diagnostics.json'),completion:{finishReason:'stop',continuations:0,outputLimit:4096,exhausted:false}};
+   const execute=vi.fn(async(_request:any)=>result),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
+   expect(managementOutcome(store,assignment,run).passed).toBe(hasHire);expect(checkpointFinalResponseEligible(assignment)).toBe(false);
+   await (scheduler as any).execute(run);
+   const request=execute.mock.calls[0][0];expect(request.system).toContain('It may already be retained from an earlier interrupted run');expect(request.system).toContain('briefly summarize its actual record IDs and result, then end');expect(request.system).toContain('a summary alone never substitutes for a missing required action');
+   expect(request.system).not.toContain('Final prose is not a deliverable');expect(request.system).not.toContain('Product implementations require commit_work');expect(request.prompt).not.toContain('inspect preserved files before continuing');expect(request.finalResponseCheckpoint).toBeUndefined();
+   expect(store.list('employees')).toHaveLength(employeeCount);expect(store.list('artifacts')).toHaveLength(0);expect(store.need('runs',run.id).status).toBe(hasHire?'succeeded':'failed');expect(store.need('assignments',assignment.id).status==='completed').toBe(hasHire);
+ });
+ it('keeps commit, canonical verification and independent review instructions for implementation runs',async()=>{
+  assignment=store.update('assignments',assignment.id,{kind:'implementation',status:'running'});
+  const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture ends at runtime dispatch');}),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
+  await (scheduler as any).execute(run);
+  expect(execute.mock.calls[0][0].system).toContain('Product implementations require commit_work, actual verify_product receipts, and independent review_work before delivery.');expect(execute.mock.calls[0][0].system).not.toContain('This is company formation work');
+ });
+});
+
+it('retains external pull-request import guidance on a review runtime dispatch',async()=>{
+ const project=store.command(owner,{type:'project.create',name:'Review external contribution',outcome:'Assess actual imported source',acceptance:['Independent review'],rationale:'External contribution review',supervisorId:run.employeeId});
+ const original=store.put('assignments',{employeeId:'external-author',supervisorId:run.employeeId,projectId:project.id,kind:'implementation',status:'awaiting_review'});
+ const artifact=store.put('artifacts',{assignmentId:original.id,projectId:project.id,employeeId:'external-author',runId:'external-author-run',kind:'commit',identity:'fixture-head',uri:'fixture://external-pr'});
+ assignment=store.update('assignments',assignment.id,{kind:'review',projectId:project.id,status:'running',payload:{artifactId:artifact.id,pullRequest:{number:7}}});
+ const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture ends at runtime dispatch');}),broker=new CorporateBroker(store,root);
+ vi.spyOn(broker.workspaces,'preparePullRequest').mockResolvedValue(undefined as any);
+ const scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,broker,'http://localhost');await (scheduler as any).execute(run);
+ expect(execute).toHaveBeenCalledOnce();const system=execute.mock.calls[0][0].system;
+ expect(system).toContain('This assignment imports externally authored code: use import_pull_request, actual verify_product receipts, and independent review_work before binding delivery.');expect(system).toContain('Never use commit_work or record_artifact to relabel this candidate.');expect(system).not.toContain('Product implementations require commit_work');expect(system).toContain('This is an independent review assignment.');
+});
+
+it.each(['nemotron-no-thinking-v1', 'qwen-main-48k'])('registers selectable %s alongside its default and permits one employee selection', async profileId => {
+  const sourceAlias = 'wlkr-management-nemotron-3.5-lightning-30b-a3b-q4-0:latest';
+  const baseline = { id: 'nemotron', name: sourceAlias, sourceAlias, alias: 'opencorp-nemotron-16384:latest', artifactIdentity: 'default', size: 18e9, local: true, available: true, capabilities: ['tools'] };
+  const variant = { ...baseline, id: profileId, name: profileId === 'qwen-main-48k' ? 'Qwen (48K context)' : 'Nemotron (no thinking)', artifactIdentity: 'variant' };
+  const runtime = { installModels: vi.fn().mockResolvedValue([baseline, variant]) } as unknown as LocalRuntime;
+  const scheduler = new Scheduler(store, runtime, new CorporateBroker(store, root), 'http://127.0.0.1:1');
+  await scheduler.initialize();
+  expect(store.need('models', sourceAlias).artifactIdentity).toBe('default');
+  expect(store.need('models', variant.id).artifactIdentity).toBe('variant');
+  expect(store.need('models', variant.id).sizeClass).toBe('large');
+  const employees = store.list('employees'), target = employees[0]!;
+  const others = employees.filter(e => e.id !== target.id).map(e => [e.id, e.modelId]);
+  store.command(owner, { type: 'employee.model', employeeId: target.id, modelId: variant.id, rationale: 'Bounded qualified profile trial' });
+  expect(store.need('employees', target.id).modelId).toBe(variant.id);
+  store.command(owner, { type: 'employee.model', employeeId: target.id, modelId: variant.name, rationale: 'Select the verified profile by its display name' });
+  expect(selectLocalModel([variant, baseline] as LocalModel[], store.need('employees', target.id).modelId)).toBe(variant);
+  expect(others.every(([id, modelId]) => store.need('employees', id).modelId === modelId)).toBe(true);
+});
+
+ it.each(['approved','hired'])('aged provisioning waits for current approval, then permits %s retained state',async finalStatus=>{
+ store.update('runs',run.id,{status:'succeeded'});store.update('assignments',assignment.id,{status:'completed'});
+ const department=store.put('departments',{name:'Current staffing',managerId:run.employeeId,status:'active'}),position=store.put('positions',{title:'Worker',level:'worker',departmentId:department.id,status:'active'});
+ const req=store.put('experiences',{kind:'requisition',status:'open',departmentId:department.id,positionId:position.id,departmentManagerId:run.employeeId,homeManagerId:run.employeeId,recruiterId:run.employeeId});
+ const candidate=store.put('experiences',{kind:'candidate',status:'proposed',version:3,requisitionId:req.id});
+ const provision=store.command(owner,{type:'assignment.create',employeeId:run.employeeId,title:'Retained provision',instructions:'Provision approved candidate',acceptance:['Actual hire'],kind:'management',priority:88});
+ store.update('assignments',provision.id,{schedulerKey:`formation:provision:${candidate.id}`,payload:{formation:true},createdAt:new Date(Date.now()-10*3600000).toISOString()});
+ const review=store.command(owner,{type:'assignment.create',employeeId:run.employeeId,title:'Current review',instructions:'Judge version three',acceptance:['Actual judgment'],kind:'management',priority:89});
+ store.update('assignments',review.id,{schedulerKey:`formation:approve:${candidate.id}:3`,payload:{formation:true}});
+ const scheduler=new Scheduler(store,{} as LocalRuntime,new CorporateBroker(store,root),'http://localhost');(scheduler as any).recoveryComplete=true;
+ vi.spyOn(scheduler,'initialize').mockResolvedValue();vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);
+ const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined);
+ await scheduler.tick();expect(execute).toHaveBeenCalledOnce();expect(execute.mock.calls[0][0]).toMatchObject({assignmentId:review.id});expect(store.need('assignments',provision.id)).toMatchObject({status:'queued',priority:88});
+ const reviewRun=store.list('runs').find(r=>r.assignmentId===review.id)!;store.update('runs',reviewRun.id,{status:'succeeded'});store.update('assignments',review.id,{status:'completed'});
+ store.update('experiences',candidate.id,{status:'changes_requested'});await scheduler.tick();expect(execute).toHaveBeenCalledOnce();
+ store.update('experiences',candidate.id,{status:finalStatus});await scheduler.tick();expect(execute).toHaveBeenCalledTimes(2);expect(execute.mock.calls[1][0]).toMatchObject({assignmentId:provision.id});expect(store.need('experiences',candidate.id).status).toBe(finalStatus);
+ });
+
+ it('candidate batch final steering waits for all exact receipts and retains dispatched membership',()=>{
+ assignment=store.update('assignments',assignment.id,{status:'running',schedulerKey:'formation:candidate:first:0',payload:{formation:true,candidateRequisitionIds:['first','second']}});
+ store.put('experiences',{kind:'candidate',requisitionId:'first',status:'proposed',authorship:{runId:run.id}});
+ expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+ store.put('experiences',{kind:'candidate',requisitionId:'second',status:'proposed',authorship:{runId:run.id}});
+ expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(true);
+ store.put('experiences',{kind:'candidate',requisitionId:'third',status:'proposed',authorship:{runId:run.id}});
+ store.update('assignments',assignment.id,{payload:{formation:true,candidateRequisitionIds:['first','third']}});
+ expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+ });
+
+it.each(['matching','default','different-profile','same-employee','same-project'])('two productive dispatch preserves %s boundary',async scenario=>{
+ const identity='a'.repeat(64);
+ store.update('policy',store.policy.id,{maxInference:2,maxProductiveTurns:scenario==='default'?1:2,productiveConcurrencyQualification:{passed:true,artifactIdentity:identity,evidence:'Actual fixture policy boundary'}});
+ const currentModel=store.list('models').find(m=>m.name===model)!;store.update('models',currentModel.id,{artifactIdentity:identity});
+ const position=store.command(owner,{type:'position.create',title:'Independent specialist',level:'worker',responsibilities:'Independent work'});
+ const employee=store.command(owner,{type:'employee.hire',name:'Independent specialist',positionId:position.id,homeManagerId:run.employeeId,modelId:model});
+ const target=store.command(owner,{type:'assignment.create',employeeId:scenario==='same-employee'?run.employeeId:employee.id,supervisorId:run.employeeId,title:'Independent task',instructions:'Inspect actual assigned evidence',acceptance:['Retained result'],kind:'management'});
+ if(scenario==='different-profile'){store.put('models',{id:'different',name:'different',artifactIdentity:'b'.repeat(64),local:true,available:true});store.update('employees',employee.id,{modelId:'different'});}
+ if(scenario==='same-project'){const project=store.put('projects',{name:'Shared project',status:'active'});store.update('assignments',assignment.id,{projectId:project.id});store.update('assignments',target.id,{projectId:project.id});}
+ const runtime={status:()=>({inferenceSlots:2,resources:{maxProductiveTurns:scenario==='default'?1:2,productiveArtifactIdentity:identity}})} as unknown as LocalRuntime;
+ const scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');
+ (scheduler as any).recoveryComplete=true;(scheduler as any).initialized=true;
+ vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});
+ vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);
+ const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined);
+ await scheduler.tick();
+ expect(execute).toHaveBeenCalledTimes(scenario==='matching'?1:0);
+ if(scenario==='matching')expect(execute.mock.calls[0][0]).toMatchObject({assignmentId:target.id,employeeId:employee.id});
+ if(scenario==='same-project'||scenario==='same-employee')expect(store.claimNext({assignmentId:target.id})).toBeUndefined();
+});
+
+it.each([false,true])('passes only the current Owner free-model exception to runtime (%s)',async enabled=>{
+ const ids=enabled?['vendor/verified-model:free']:[];
+ if(enabled){store.command(owner,{type:'policy.update',openRouterFreeModels:ids});store.update('runs',run.id,{policyRevision:store.policy.revision});}
+ const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture stops at runtime dispatch');});
+ const scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
+ await (scheduler as any).execute(store.need('runs',run.id));
+ const request=execute.mock.calls[0][0];expect(request.openRouterFreeModels).toEqual(ids);
+ expect(request.system.includes('Only local models.')).toBe(!enabled);
+ expect(request.system.includes('verified free-provider')).toBe(enabled);
+ expect(request.system).toContain('Zero unapproved spending.');
+});
+
+describe('exact candidate-review final response',()=>{
+ it.each(['approved','changes_requested','hired'])('accepts only the retained exact-version own %s review',status=>{
+  const candidate=store.put('experiences',{kind:'candidate',version:2,status:'proposed'});
+  assignment=store.update('assignments',assignment.id,{status:'running',schedulerKey:`formation:approve:${candidate.id}:2`,payload:{formation:true}});
+  expect(checkpointFinalResponseEligible(assignment)).toBe(true);
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+  const field=status==='changes_requested'?'feedback':'approval',type=status==='changes_requested'?'recruitment.reject':'recruitment.approve';
+  const receipt={authorId:run.employeeId,runId:run.id,rationale:'Independent evidence-based fixture judgment'};
+  store.update('experiences',candidate.id,{status,[field]:receipt});
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+  store.update('runs',run.id,{corporateCommands:[{type,id:candidate.id}]});
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(true);
+  store.update('experiences',candidate.id,{[field]:{...receipt,authorId:'another-manager'}});
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+  const other=store.put('runs',{...run,id:undefined,sessionId:randomUUID(),assignmentId:'unrelated',corporateCommands:[{type,id:candidate.id}]});
+  store.update('experiences',candidate.id,{[field]:{...receipt,runId:other.id}});
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+  store.update('experiences',candidate.id,{[field]:receipt,version:3,history:[{...candidate,version:2,status,[field]:receipt}]});
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+  store.update('experiences',candidate.id,{version:2,status:'proposed'});
+  expect(checkpointFinalResponseReady(store,assignment,run.id)).toBe(false);
+  store.update('experiences',candidate.id,{status});
+  store.command(owner,{type:'control',action:'pause'});
+  expect(()=>checkpointFinalResponseReady(store,assignment,run.id)).toThrow();
+ });
+});
+
+it('labels inline knowledge paths as vault provenance and supplies scoped content paging',async()=>{
+ const broker=new CorporateBroker(store,root);
+ const notes=broker.knowledgeContext(actor,[run.employeeId]);
+ expect(notes.length).toBeGreaterThan(0);
+ const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture stops at runtime dispatch');});
+ const scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,broker,'http://localhost');
+ const captured=vi.spyOn(broker,'knowledgeContext');
+ await (scheduler as any).execute(store.need('runs',run.id));
+ const prompt=execute.mock.calls[0][0].prompt;
+ expect(prompt).toContain('path values are vault-relative provenance, not native workspace files');
+ expect(prompt).toContain('Reuse complete inline contents without rereading');
+ expect(prompt).toContain('company_detail {collection:"knowledge",id:"the supplied note ID",view:"content",offset:nextOffset}');
+ expect(prompt).toContain('follow returned nextOffset until null');
+ const supplied=captured.mock.results[0].value;
+ expect(prompt).toContain(JSON.stringify(supplied));
+ for(const note of supplied)expect(prompt).not.toContain(join(run.workspace!,note.path));
+ // The advertised route is the existing scoped knowledge reader, not a file read.
+ const currentRun=store.put('runs',{...run,id:undefined,status:'running',sessionId:randomUUID()});
+ const reader={...actor,runId:currentRun.id} as Actor;
+ const page=await broker.call(reader,'company_detail',{collection:'knowledge',id:notes[0]!.id,view:'content',offset:1});
+ expect(page.content).toBe(store.readKnowledge(notes[0]!.id).content.slice(1));
+});
+
+it('passes exact mixed pins through drain and runtime resource reconfiguration',async()=>{
+ const qualification={mode:'local-remote',passed:true,artifactIdentity:'a'.repeat(64),remoteModelId:'gemini:fixture',remoteArtifactIdentity:'b'.repeat(64),evidence:'Synthetic retained pair'};
+ store.update('policy',store.policy.id,{maxInference:2,maxProductiveTurns:2,productiveConcurrencyQualification:qualification});
+ const configureResources=vi.fn(async()=>{}),runtime={configureResources} as unknown as LocalRuntime;
+ const scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');
+ const shutdown=vi.spyOn(scheduler,'shutdown').mockResolvedValue();vi.spyOn(scheduler,'start').mockImplementation(()=>{});
+ await scheduler.configureResources();
+ expect(shutdown).toHaveBeenCalledOnce();expect(configureResources).toHaveBeenCalledWith(expect.objectContaining({maxProductiveTurns:2,productiveArtifactIdentity:qualification.artifactIdentity,productiveRemoteModelId:qualification.remoteModelId,productiveRemoteArtifactIdentity:qualification.remoteArtifactIdentity}));
+ expect(shutdown.mock.invocationCallOrder[0]).toBeLessThan(configureResources.mock.invocationCallOrder[0]);
+});
+it('dispatches the canonical provision-only packet without unrelated company context or guide duplication',async()=>{
+ const broker=new CorporateBroker(store,root),req=store.put('experiences',{kind:'requisition',recruiterId:run.employeeId,homeManagerId:run.employeeId,firstWork:'Inspect assigned staffing records'}),candidate=store.put('experiences',{kind:'candidate',status:'approved',version:2,name:'Actual approved fixture',requisitionId:req.id,onboarding:'Read actual responsibilities',sourceIds:[]});
+ store.update('assignments',assignment.id,{schedulerKey:`formation:provision:${candidate.id}`,payload:{formation:true},projectId:null});
+ store.command(owner,{type:'knowledge.write',scope:'company',content:'UNRELATED_COMPANY_INLINE_NOTE',source:'Independent fixture company note'});
+ const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture ends at dispatch');}),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,broker,'http://localhost');
+ const expected=broker.provisionPrompt(actor)!;await (scheduler as any).execute(store.need('runs',run.id));
+ const request=execute.mock.calls[0][0];expect(request.system).toBe(expected.system);expect(request.prompt).toBe(expected.prompt);expect(request.corporateOnly).toBe(true);expect(request.provisionOnly).toBe(true);expect(request.prompt).not.toContain('UNRELATED_COMPANY_INLINE_NOTE');expect(request.system).not.toContain('Product implementations require');expect(request.prompt).toContain(candidate.id);expect(request.prompt).toContain(req.id);
+});
+
+import {ProviderCooldownError} from '../src/runtime/resource-budget.js';
+it('holds queued provider work before claiming while dispatching eligible local work',async()=>{
+ store.update('runs',run.id,{status:'succeeded'});store.update('assignments',assignment.id,{status:'completed'});const employee=store.need('employees',run.employeeId);store.update('employees',employee.id,{modelId:'gemini:fixture'});
+ const target=store.command(owner,{type:'assignment.create',employeeId:employee.id,title:'Wait for provider',instructions:'Actual pending work',acceptance:['Retain work'],kind:'management'}),retryAt=new Date(Date.now()+60000).toISOString();
+ const runtime={providerCooldown:(id:string)=>id==='gemini:fixture'?{provider:'gemini',retryAt}:undefined,status:()=>({inferenceSlots:2})} as unknown as LocalRuntime,scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');(scheduler as any).recoveryComplete=true;(scheduler as any).initialized=true;vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);vi.spyOn(scheduler as any,'idle').mockImplementation(()=>{});const localEmployee=store.list('employees').find(e=>e.id!==employee.id)!;store.update('employees',localEmployee.id,{modelId:model});const local=store.command(owner,{type:'assignment.create',employeeId:localEmployee.id,title:'Independent local work',instructions:'Continue local work',acceptance:['Actual progress'],kind:'management'});const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined);const before=store.list('runs').length;await scheduler.tick();expect(execute).toHaveBeenCalledOnce();expect((execute.mock.calls[0][0] as EmployeeRun).assignmentId).toBe(local.id);expect(store.list('runs')).toHaveLength(before+1);expect(store.need('assignments',target.id)).toMatchObject({status:'queued',attempts:0,availableAt:retryAt,resourceWait:{provider:'gemini',retryAt}});
+});
+it.each(['none','session','corporate','pullRequest'])('requeues only an untouched cooldown admission, prior effect=%s',async effect=>{
+ const started=effect!=='none';
+ store.update('runs',run.id,{sessionId:effect==='session'?'actual-native-session':null,...(effect==='corporate'?{corporateCalls:1}:{})});store.update('assignments',assignment.id,{status:'running',attempts:1,...(effect==='pullRequest'?{pullRequestCandidate:{id:'retained'}}:{})});const retryAt=new Date(Date.now()+60000).toISOString(),before=store.need('assignments',assignment.id).attempts;
+ const broker=new CorporateBroker(store,root),scheduler=new Scheduler(store,{execute:async()=>{throw new ProviderCooldownError('gemini',retryAt);}} as unknown as LocalRuntime,broker,'http://localhost');vi.spyOn(scheduler as any,'diagnoseFailure').mockImplementation(()=>{});await (scheduler as any).execute(store.need('runs',run.id));
+ expect(store.need('assignments',assignment.id).status).toBe(started?'blocked':'queued');expect(store.need('runs',run.id).status).toBe(started?'failed':'interrupted');expect(store.need('assignments',assignment.id).attempts).toBe(started?before:before-1);if(!started)expect(store.need('assignments',assignment.id).availableAt).toBe(retryAt);
+});
+
+import {ProviderAvailabilityError} from '../src/runtime/resource-budget.js';
+it.each(['daily reservation budget','fresh Owner audit required','free-pool'])('holds %s before claim and dispatches local work',async reason=>{
+ const selected=reason==='free-pool'?'free-pool':'gemini:fixture';
+ store.update('runs',run.id,{status:'succeeded'});store.update('assignments',assignment.id,{status:'completed'});const employee=store.need('employees',run.employeeId);store.update('employees',employee.id,{modelId:selected});
+ const target=store.command(owner,{type:'assignment.create',employeeId:employee.id,title:'Wait for provider',instructions:'Actual pending work',acceptance:['Retain work'],kind:'management'}),retryAt=new Date(Date.now()+60000).toISOString();
+ const runtime={providerAvailability:async(id:string)=>id===selected?new ProviderAvailabilityError(selected,retryAt,reason):undefined,status:()=>({inferenceSlots:2})} as unknown as LocalRuntime,scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');(scheduler as any).recoveryComplete=true;(scheduler as any).initialized=true;vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);vi.spyOn(scheduler as any,'idle').mockImplementation(()=>{});const localEmployee=store.list('employees').find(e=>e.id!==employee.id)!;store.update('employees',localEmployee.id,{modelId:model});const local=store.command(owner,{type:'assignment.create',employeeId:localEmployee.id,title:'Independent local work',instructions:'Continue local work',acceptance:['Actual progress'],kind:'management'});const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined);const before=store.list('runs').length;await scheduler.tick();expect(execute).toHaveBeenCalledOnce();expect((execute.mock.calls[0][0] as EmployeeRun).assignmentId).toBe(local.id);expect(store.list('runs')).toHaveLength(before+1);expect(store.need('assignments',target.id)).toMatchObject({status:'queued',attempts:0,availableAt:retryAt,resourceWait:{provider:selected,retryAt}});
+});
+
+it('holds expired registered provider evidence while keeping local work eligible',async()=>{
+ store.update('runs',run.id,{status:'succeeded'});store.update('assignments',assignment.id,{status:'completed'});const employee=store.need('employees',run.employeeId);store.update('employees',employee.id,{modelId:'gemini:fixture'});
+ const target=store.command(owner,{type:'assignment.create',employeeId:employee.id,title:'Wait for provider',instructions:'Actual pending work',acceptance:['Retain work'],kind:'management'});
+ const runtime={providerAvailability:async()=>undefined,status:()=>({inferenceSlots:2})} as unknown as LocalRuntime,scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');(scheduler as any).recoveryComplete=true;(scheduler as any).initialized=true;vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);vi.spyOn(scheduler as any,'idle').mockImplementation(()=>{});const localEmployee=store.list('employees').find(e=>e.id!==employee.id)!;store.update('employees',localEmployee.id,{modelId:model});const local=store.command(owner,{type:'assignment.create',employeeId:localEmployee.id,title:'Independent local work',instructions:'Continue local work',acceptance:['Actual progress'],kind:'management'});const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined);const before=store.list('runs').length;await scheduler.tick();expect(execute).toHaveBeenCalledOnce();expect((execute.mock.calls[0][0] as EmployeeRun).assignmentId).toBe(local.id);expect(store.list('runs')).toHaveLength(before+1);expect(store.need('assignments',target.id)).toMatchObject({status:'queued',attempts:0,resourceWait:{provider:'gemini',reason:expect.stringContaining('refresh inventory')}});
+});
+
+it('does not apply an obsolete provider wait after actual model selection changes during preflight',async()=>{
+ store.update('runs',run.id,{status:'succeeded'});store.update('assignments',assignment.id,{status:'completed'});const employee=store.need('employees',run.employeeId);store.update('employees',employee.id,{modelId:'gemini:fixture'});
+ const target=store.command(owner,{type:'assignment.create',employeeId:employee.id,title:'Wait for provider',instructions:'Actual pending work',acceptance:['Retain work'],kind:'management'});
+ const runtime={providerAvailability:async(id:string)=>{if(id==='gemini:fixture'){store.update('employees',employee.id,{modelId:model});return new ProviderAvailabilityError('gemini',new Date(Date.now()+86400000).toISOString(),'Old provider exhausted');}return undefined;},status:()=>({inferenceSlots:2})} as unknown as LocalRuntime,scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');(scheduler as any).recoveryComplete=true;(scheduler as any).initialized=true;vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);vi.spyOn(scheduler as any,'idle').mockImplementation(()=>{});const localEmployee=store.list('employees').find(e=>e.id!==employee.id)!;store.update('employees',localEmployee.id,{modelId:model});const local=store.command(owner,{type:'assignment.create',employeeId:localEmployee.id,title:'Independent local work',instructions:'Continue local work',acceptance:['Actual progress'],kind:'management'});const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined);const before=store.list('runs').length;await scheduler.tick();expect(execute).toHaveBeenCalledOnce();expect((execute.mock.calls[0][0] as EmployeeRun).assignmentId).toBe(local.id);expect(store.list('runs')).toHaveLength(before+1);expect(store.need('assignments',target.id).resourceWait).toBeUndefined();expect(store.need('assignments',target.id)).toMatchObject({status:'queued',attempts:0,availableAt:target.availableAt});
+});
+
+it('reuses one ordered latest-run map for a synchronous blocked reconciliation and refreshes on the next pass',()=>{
+ store.update('runs',run.id,{status:'failed'});store.update('assignments',assignment.id,{status:'blocked'});
+ const other=store.command(owner,{type:'assignment.create',employeeId:run.employeeId,title:'Other blocked work',instructions:'Retain other work',acceptance:['Actual outcome'],kind:'management'});store.update('assignments',other.id,{status:'blocked'});
+ const otherRun=store.put('runs',{...run,id:'other-failed',sessionId:null,assignmentId:other.id,status:'failed'}),newest=store.put('runs',{...run,id:'latest-failed',sessionId:null,status:'failed'});
+ const scheduler=new Scheduler(store,{} as LocalRuntime,{} as CorporateBroker,'http://localhost'),diagnose=vi.spyOn(scheduler as any,'diagnoseFailure').mockImplementation(()=>{});
+ (scheduler as any).reconcileOrganization();const calls=diagnose.mock.calls.filter(([r])=>[assignment.id,other.id].includes((r as EmployeeRun).assignmentId));expect(calls).toHaveLength(2);expect(calls.map(([r])=>(r as EmployeeRun).id).sort()).toEqual([newest.id,otherRun.id].sort());expect(calls[0][1]).toBe(calls[1][1]);
+ const later=store.put('runs',{...run,id:'later-failed',sessionId:null,status:'failed'});diagnose.mockClear();(scheduler as any).reconcileOrganization();expect(diagnose.mock.calls.find(([r])=>(r as EmployeeRun).assignmentId===assignment.id)?.[0]).toMatchObject({id:later.id});
+});
+it('keeps current assignment state and newest-run checks outside the synchronous map',()=>{
+ store.update('runs',run.id,{status:'failed'});store.update('assignments',assignment.id,{status:'blocked'});const scheduler=new Scheduler(store,{} as LocalRuntime,{} as CorporateBroker,'http://localhost'),enqueue=vi.spyOn(scheduler as any,'enqueue').mockImplementation(()=>{});
+ store.put('runs',{...run,id:'newer-run',sessionId:null,status:'failed'});(scheduler as any).diagnoseFailure(store.need('runs',run.id));expect(enqueue).not.toHaveBeenCalled();
+ store.update('assignments',assignment.id,{status:'queued'});(scheduler as any).diagnoseFailure(store.need('runs',run.id),new Map([[assignment.id,store.need('runs',run.id)]]));expect(enqueue).not.toHaveBeenCalled();
+});
+
+it('queries exact scheduler keys with original first-match ordering and current mutations',()=>{
+ const key="key:literal'quoted",createdAt='2026-01-01T00:00:00.000Z';const first=store.put('assignments',{...assignment,id:'key-first',schedulerKey:key,createdAt}),second=store.put('assignments',{...assignment,id:'key-second',schedulerKey:key,createdAt});
+ expect(store.assignmentBySchedulerKey(key)?.id).toBe(first.id);expect(store.assignmentBySchedulerKey('missing')).toBeUndefined();
+ store.update('assignments',first.id,{status:'cancelled'});expect(store.assignmentBySchedulerKey(key)?.status).toBe('cancelled');store.update('assignments',first.id,{schedulerKey:'changed'});expect(store.assignmentBySchedulerKey(key)?.id).toBe(second.id);
+ const plan=store.db.prepare("EXPLAIN QUERY PLAN SELECT data FROM assignments WHERE json_extract(data,'$.schedulerKey')=? ORDER BY created_at,rowid LIMIT 1").all(key);expect(JSON.stringify(plan)).toContain('assignments_scheduler_key');
+});
+
+it('adds the scheduler-key index to existing version-one records without rewriting them',()=>{
+ store.update('assignments',assignment.id,{schedulerKey:'existing:key'});const before=store.need('assignments',assignment.id);store.db.exec('DROP INDEX assignments_scheduler_key; DELETE FROM migrations WHERE version=2');migrate(store.db);migrate(store.db);expect(store.assignmentBySchedulerKey('existing:key')).toEqual(before);expect(store.db.prepare('SELECT max(version) version FROM migrations').get()).toMatchObject({version:2});const reopened=new CompanyStore(root);try{expect(reopened.assignmentBySchedulerKey('existing:key')).toEqual(before);}finally{reopened.close();}
+});
+
+it('reads dispatch-blocking runs freshly through the status index, preserving all three active states',()=>{
+ const states=['running','cancelling','uncertain','queued','succeeded','failed','interrupted'] as const;for(const status of states)store.put('runs',{...run,id:`status-${status}`,sessionId:null,status});
+ expect(store.activeRuns().map(r=>r.id)).toEqual(store.list('runs').filter(r=>['running','cancelling','uncertain'].includes(r.status)).map(r=>r.id));
+ store.update('runs','status-running',{status:'succeeded'});store.update('runs','status-queued',{status:'running'});expect(store.activeRuns().some(r=>r.id==='status-running')).toBe(false);expect(store.activeRuns().some(r=>r.id==='status-queued')).toBe(true);
+ const plan=store.db.prepare("EXPLAIN QUERY PLAN SELECT data FROM runs WHERE status IN ('running','cancelling','uncertain') ORDER BY created_at,rowid").all();expect(JSON.stringify(plan)).toContain('runs_status');
+});
+it('rechecks active employee occupancy after awaited provider admission before claiming',async()=>{
+ store.update('runs',run.id,{status:'succeeded'});const runtime={providerAvailability:async()=>{store.update('runs',run.id,{status:'running'});},status:()=>({inferenceSlots:2})} as unknown as LocalRuntime,scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');
+ (scheduler as any).recoveryComplete=true;(scheduler as any).initialized=true;vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);vi.spyOn(scheduler as any,'idle').mockImplementation(()=>{});const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined),before=store.list('runs').length;
+ await scheduler.tick();expect(execute).not.toHaveBeenCalled();expect(store.list('runs')).toHaveLength(before);expect(store.need('assignments',assignment.id).status).toBe('queued');
+});
+
+
+it.each(['internal implementation','external implementation','internal management'])('scopes empty-repository lifecycle guidance to %s without changing acceptance',async scenario=>{
+ const product=scenario.startsWith('internal')?store.command(owner,{type:'product.register_internal',name:'Fixture executable',managerId:run.employeeId,verificationCommand:'node --test',rationale:'Real fixture utility'}):store.list('products')[0];
+ const project=store.command(owner,{type:'project.create',name:'Assigned utility',productId:product.id,outcome:'Manager-defined useful behavior',acceptance:['Actual implementation'],supervisorId:run.employeeId,rationale:'Existing scoped work'});
+ assignment=store.update('assignments',assignment.id,{projectId:project.id,kind:scenario.endsWith('management')?'management':'implementation',status:'running'});const acceptance=assignment.acceptance;
+ if(!scenario.startsWith('internal'))store.update('products',product.id,{kind:'external'});
+ const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture ends at runtime dispatch');}),broker=new CorporateBroker(store,root);
+ const scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,broker,'http://localhost');
+ if(scenario==='external implementation'){const dependencies=await import('../src/tools/dependencies.js');vi.spyOn(dependencies,'prepareProductDependencies').mockResolvedValue({installed:true,lockDigest:'fixture',receiptPath:'fixture',downloaded:0,reused:0,incrementalCost:0,environment:{}} as any);}
+ await (scheduler as any).execute(run);
+ expect(execute).toHaveBeenCalledOnce();const request=execute.mock.calls[0][0];expect(request.system.includes('This company-owned internal-tool repository may start empty.')).toBe(scenario==='internal implementation');
+ if(scenario==='internal implementation'){expect(request.system).toContain('Preserve and reuse any existing files');expect(request.system).toContain('manager-defined implementation');expect(request.system).toContain('bare repository is Git storage');expect(request.system).toContain('Product implementations require commit_work');}
+ expect(store.need('assignments',assignment.id).acceptance).toEqual(acceptance);vi.restoreAllMocks();
+});
+
+it.each(['none','corporate','dependency','delivery','pullRequest','cleanup','revoked'])('defers a proved empty native capacity refusal without discarding evidence, effect=%s',async effect=>{
+ store.update('assignments',assignment.id,{status:'running',attempts:1,...(effect==='pullRequest'?{pullRequestCandidate:{id:'retained'}}:{})});
+ const retryAt=new Date(Date.now()+600000).toISOString(),evidence={runId:run.id,sessionId:'session',modelId:'free-pool',artifactIdentity:'synthetic-pool',usage:{inputTokens:0,outputTokens:0,requests:1,durationMs:10},diagnosticsPath:'synthetic-failure.json',messagesPath:'synthetic-messages.json',messagesSource:'database',databasePath:'synthetic.db',continuations:0,code:'provider_capacity_wait',error:'Synthetic capacity refusal',capturedAt:new Date().toISOString(),providerWait:{provider:'free-pool',retryAt}} as const;
+ store.update('runs',run.id,{...(effect==='dependency'?{dependencyPreparation:{status:'retained'}}:{}),...(effect==='delivery'?{deliveryOutcome:{status:'retained'}}:{})});
+ const runtime={execute:async(request:any)=>{expect(request.deferInitialPoolWait).toBe(!['dependency','delivery','pullRequest'].includes(effect));store.update('runs',run.id,{...(effect==='corporate'?{corporateCalls:1}:{}),...(effect==='revoked'?{tokenRevoked:true}:{})});throw new RuntimeExecutionError(effect==='cleanup'?'runtime_failed':'provider_capacity_wait','Synthetic capacity refusal',undefined,{evidence});}} as unknown as LocalRuntime;
+ const scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost'),diagnose=vi.spyOn(scheduler as any,'diagnoseFailure').mockImplementation(()=>{});
+ await (scheduler as any).execute(store.need('runs',run.id));
+ const actual=store.need('assignments',assignment.id),ended=store.need('runs',run.id);
+ expect(ended.runtimeFailureEvidence).toEqual(evidence);expect(ended.sessionId).toBe('session');expect(actual.attempts).toBe(1);
+ if(effect==='none'){expect(ended.status).toBe('interrupted');expect(actual).toMatchObject({status:'queued',availableAt:retryAt,resourceWait:{provider:'free-pool',retryAt}});expect(diagnose).not.toHaveBeenCalled();}
+ else expect(actual.resourceWait).toBeUndefined();
 });

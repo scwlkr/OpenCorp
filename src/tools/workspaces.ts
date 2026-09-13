@@ -8,7 +8,7 @@ import { checked, brokerEnvironment } from './process.js';
 import { CompanyStore } from '../storage/store.js';
 
 export function safeChild(root:string, path:string) {const base=realpathSync(root), resolved=realpathSync(path), rel=relative(base,resolved);if(rel.startsWith('..')||isAbsolute(rel))throw new DomainError('path_denied','Path is outside the assigned workspace.',403);return resolved;}
-export function parseRepository(remote:string) {const match=remote.match(/(?:github\.com[:/])([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/);if(!match)throw new Error('Only configured GitHub repositories are supported for credentialed delivery.');return match[1]!;}
+export function parseRepository(remote:string) {const match=remote.match(/(?:github\.com[:/]|github-scwlkr:)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/);if(!match)throw new Error('Only configured GitHub repositories are supported for credentialed delivery.');return match[1]!;}
 /** Physical review/check location; logical project ownership never changes. */
 export function artifactProject(project:Project,artifact:Artifact):Project {
  if(!Object.hasOwn(artifact,'sourcePullRequest')&&!Object.hasOwn(artifact,'reviewWorkspace'))return project;
@@ -88,7 +88,25 @@ export class WorkspaceManager {
   if(!Buffer.from(content,'utf8').equals(raw.stdout)||content.includes('\0'))throw new DomainError('source_not_text','This source is not a UTF-8 text file; use the product workspace for binary artifacts.',415);
   return content;
  }
+ internalRepository(product:Product) {
+  if(product.kind!=='internal-tool'||!/^[a-zA-Z0-9-]+$/.test(product.id)||product.repository!==join(this.dataRoot,'repositories',`${product.id}.git`))throw new DomainError('repository_denied','Internal software must use its assigned company-owned repository.',403);
+  return product.repository;
+ }
+ async createInternalRepository(product:Product) {
+  const mirror=this.internalRepository(product);mkdirSync(join(this.dataRoot,'repositories'),{recursive:true});
+  const env={...brokerEnvironment(),GIT_CONFIG_GLOBAL:'/dev/null'};
+  if(!existsSync(mirror))await checked('git',['init','--bare','--initial-branch=main',mirror],{env});
+  if(lstatSync(mirror).isSymbolicLink())throw new DomainError('repository_denied','Internal repository symlink is forbidden.',403);safeChild(join(this.dataRoot,'repositories'),mirror);
+  // The empty baseline is infrastructure, never an employee-authored deliverable.
+  const git=(args:string[],input?:string)=>checked('git',['--git-dir',mirror,'-c','core.hooksPath=/dev/null','-c','user.name=OpenCorp','-c','user.email=opencorp@localhost',...args],{env,input});
+  let baseCommit:string;
+  try{baseCommit=await git(['rev-parse','refs/heads/main']);}catch{const tree=await git(['hash-object','-t','tree','--stdin','-w'],'');baseCommit=await git(['commit-tree',tree,'-m','Initialize company-owned tool repository']);await git(['update-ref','refs/heads/main',baseCommit]);}
+  if(product.adoption?.identity)baseCommit=await git(['rev-parse',`${product.adoption.identity}^{commit}`]);
+  const binding={local:true,repository:mirror,url:`opencorp:tool:${product.id}`,defaultBranch:'main',public:false,mirror,baseCommit,originalHead:baseCommit,localStatus:'',issues:[],pulls:[],files:{} as Record<string,string>,fileMetadata:{} as Record<string,{totalCharacters:number;storedCharacters:number;truncated:boolean}>,refreshedAt:new Date().toISOString()};
+  this.store.update('products',product.id,{binding});return binding;
+ }
  async inspect(product:Product) {
+  if(product.kind==='internal-tool')return this.createInternalRepository(product);
   if(!this.store.snapshot().policy.allowedRepositories.includes(product.repository))throw new DomainError('repository_denied','Repository outside Owner envelope.',403);
   const remote=await checked('git',['-C',product.repository,'remote','get-url','origin']);const repo=parseRepository(remote);
   const details=JSON.parse(await checked('gh',['repo','view',repo,'--json','nameWithOwner,url,isPrivate,defaultBranchRef']));
@@ -104,7 +122,7 @@ export class WorkspaceManager {
   const files:Record<string,string>={},fileMetadata:Record<string,{totalCharacters:number;storedCharacters:number;truncated:boolean}>={};for(const file of ['AGENTS.md','README.md','docs/STATUS.md','docs/ROADMAP.md','docs/CONTRIBUTING.md','docs/agents/issue-tracker.md','package.json','Makefile','.ruby-version','.github/workflows/ci.yml']) {
    try{const content=await this.readBlob(mirror,baseCommit,file);files[file]=content.slice(0,file==='docs/STATUS.md'?9000:14000);fileMetadata[file]={totalCharacters:content.length,storedCharacters:files[file].length,truncated:files[file].length<content.length};}catch{/* Not every product uses every convention. Read an individual file for explicit errors. */}
   }
-  const binding={repository:repo,url:details.url,defaultBranch:details.defaultBranchRef.name,public:!details.isPrivate,mirror,baseCommit,originalHead,localStatus,issues,pulls,files,fileMetadata,refreshedAt:new Date().toISOString()};
+  const binding={local:false,repository:repo,url:details.url,defaultBranch:details.defaultBranchRef.name,public:!details.isPrivate,mirror,baseCommit,originalHead,localStatus,issues,pulls,files,fileMetadata,refreshedAt:new Date().toISOString()};
   this.store.update('products',product.id,{binding});this.store.emit('product.inspected',{productId:product.id,baseCommit,openIssues:issues.length});return binding;
  }
  async ensure(project:Project) {
@@ -127,5 +145,15 @@ export class WorkspaceManager {
  }
  async head(project:Project,options:{signal?:AbortSignal}={}){return this.git(project,['rev-parse','HEAD'],options);}
  async clean(project:Project,options:{signal?:AbortSignal}={}){return (await this.git(project,['status','--porcelain'],options)).length===0;}
- async readProduct(productId:string,file:string){if(file.startsWith('/')||file.includes('..')||file.includes('\0')||file.startsWith('-'))throw new DomainError('path_denied','Use a repository-relative source path.',403);const product=this.store.get('products',productId);if(!product)throw new Error('Unknown product.');if(!this.store.policy.allowedRepositories.includes(product.repository))throw new DomainError('repository_denied','Repository outside Owner envelope.',403);const b=product.binding??await this.inspect(product);return this.readBlob(b.mirror,b.baseCommit,file);}
+ async readProduct(productId:string,file:string){if(file.startsWith('/')||file.includes('..')||file.includes('\0')||file.startsWith('-'))throw new DomainError('path_denied','Use a repository-relative source path.',403);const product=this.store.get('products',productId);if(!product)throw new Error('Unknown product.');if(product.kind==='internal-tool')this.internalRepository(product);else if(!this.store.policy.allowedRepositories.includes(product.repository))throw new DomainError('repository_denied','Repository outside Owner envelope.',403);const b=product.binding??await this.inspect(product);
+  if(!/^[a-f0-9]{40,64}$/i.test(b.baseCommit))throw new DomainError('source_identity_required','Source reads require the recorded immutable baseline commit.',409);
+  safeChild(join(this.dataRoot,'repositories'),b.mirror);
+  const path=file==='.'?'':file.replace(/\/+$/,''),object=`${b.baseCommit}:${path}`,env={...brokerEnvironment(),GIT_CONFIG_GLOBAL:'/dev/null'};
+  const kind=await checked('git',['--git-dir',b.mirror,'cat-file','-t',object],{env});
+  if(kind!=='tree')return this.readBlob(b.mirror,b.baseCommit,path);
+  const raw=await promisify(execFile)('/usr/bin/git',['--git-dir',b.mirror,'ls-tree','-z',object],{env,encoding:'buffer',maxBuffer:2_000_000,timeout:30_000});
+  const text=raw.stdout.toString('utf8');if(!Buffer.from(text,'utf8').equals(raw.stdout))throw new DomainError('source_not_text','Directory names are not valid UTF-8 text.',415);
+  const entries=text.split('\0').filter(Boolean).map(entry=>{const tab=entry.indexOf('\t'),[mode,type,objectId]=entry.slice(0,tab).split(' ');return {name:entry.slice(tab+1),kind:mode==='120000'?'symlink':type==='tree'?'directory':type==='commit'?'submodule':'file',mode,objectId};});
+  return {sourceKind:'directory' as const,baseCommit:b.baseCommit,content:JSON.stringify(entries,null,2)};
+ }
 }

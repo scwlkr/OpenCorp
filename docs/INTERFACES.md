@@ -1,6 +1,8 @@
 # Owner interfaces
 
-All four interfaces read and mutate the same local company service. Closing an interface leaves the company running. Pause, stop, and the $0 unapproved spending restriction are enforced by the backend.
+The existing WebUI, CLI, TUI and API read and mutate the same local company service. Closing an interface leaves the company running. Pause, stop, and the $0 unapproved spending restriction are enforced by the backend.
+
+The intended Owner experience is Telegram for quick conversations, approvals and controls, with email for daily reports and larger proposals. Those channels and verified message approvals are not implemented here. Full-power/low-power/stop controls are also planned; current pause is not a low-power mode. See [COMPANY.md](../COMPANY.md) and the [implementation plan](https://github.com/scwlkr/OpenCorp/issues/1). Existing surfaces remain useful for installation and troubleshooting.
 
 ## Open the company
 

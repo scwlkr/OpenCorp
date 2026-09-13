@@ -118,7 +118,7 @@ describe.skipIf(process.platform !== 'darwin')('native process-tree boundary', (
     const parent = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { cwd: process.cwd(), stdio: 'ignore' });
     try {
       const until = Date.now() + 10000;
-      while (Date.now() < until) { try { await readFile(join(workspace, 'ready.txt')); break; } catch { await new Promise(resolve => setTimeout(resolve, 25)); } }
+      while (Date.now() < until) { try { if (await readFile(join(workspace, 'ready.txt'), 'utf8') === 'ready') break; } catch { /* Readiness file is not created yet. */ } await new Promise(resolve => setTimeout(resolve, 25)); }
       expect(await readFile(join(workspace, 'ready.txt'), 'utf8')).toBe('ready');
       const job = (await readdir(join(root, 'runtime/control/jobs')))[0];
       const receiptPath = join(root, 'runtime/control/jobs', job, 'receipt.json');

@@ -31,11 +31,12 @@ afterEach(async()=>{await ollama.stop();vi.restoreAllMocks();vi.unstubAllGlobals
 function inventory(changeOnCreate=false){
  vi.spyOn(ollama,'start').mockResolvedValue();
  let raw=profileRaw;
+ const extraProfiles=new Map<string,string>();
  const fetch=vi.fn(async(_url:string,init?:RequestInit)=>{
   const path=new URL(_url).pathname;
-  if(path==='/api/tags')return Response.json({models:[{name:sourceAlias,digest:hash(sourceRaw),size:weight.length},{name:alias,digest:hash(raw),size:weight.length}]});
-  if(path==='/api/create'){if(changeOnCreate)raw=JSON.stringify({...JSON.parse(profileRaw),changed:true});await files.writeFile(blobPath(ollama.modelStore,params),params);await writeManifest(ollama.modelStore,alias,raw);return Response.json({status:'success'});}
-  if(path==='/api/show')return Response.json({template:'fixture local template',parameters:'num_ctx 16384\nnum_predict 4096\ntemperature 0.2',capabilities:['tools']});
+  if(path==='/api/tags')return Response.json({models:[{name:sourceAlias,digest:hash(sourceRaw),size:weight.length},{name:alias,digest:hash(raw),size:weight.length},...Array.from(extraProfiles,([name,content])=>({name,digest:hash(content),size:weight.length}))]});
+  if(path==='/api/create'){const request=JSON.parse(init!.body as string);if(request.model!==alias){const parameters=JSON.stringify(request.parameters),content=JSON.stringify({layers:[descriptor(weight),descriptor(parameters)],config:descriptor(config)});await files.writeFile(blobPath(ollama.modelStore,parameters),parameters);await writeManifest(ollama.modelStore,request.model,content);extraProfiles.set(request.model,content);return Response.json({status:'success'});}if(changeOnCreate)raw=JSON.stringify({...JSON.parse(profileRaw),changed:true});await files.writeFile(blobPath(ollama.modelStore,params),params);await writeManifest(ollama.modelStore,alias,raw);return Response.json({status:'success'});}
+  if(path==='/api/show'){const model=JSON.parse(init!.body as string).model;return Response.json({template:'fixture local template',parameters:`num_ctx ${model===alias?16384:49152}\nnum_predict 4096\ntemperature 0.2`,capabilities:['tools']});}
   throw new Error(`Unexpected provider call ${path}: ${init?.method}`);
  });
  ollama.url='http://127.0.0.1:1';vi.stubGlobal('fetch',fetch);return {fetch,changeProfile:()=>{raw=JSON.stringify({...JSON.parse(profileRaw),changed:true});}};
@@ -77,7 +78,7 @@ describe('owned Ollama blob isolation',()=>{
  it('recreates missing generated metadata with the same actual profile identity and no download',async()=>{
   await imported();await profile();await files.writeFile(blobPath(ollama.modelStore,params),params);const api=inventory(),before=(await ollama.models())[0];await files.unlink(blobPath(ollama.modelStore,params));await files.rm(blobPath(source,params),{force:true});
   const after=(await ollama.models())[0];expect(after).toEqual(before);expect(await files.readFile(blobPath(ollama.modelStore,params),'utf8')).toBe(params);
-  const creates=api.fetch.mock.calls.filter(([url])=>url.endsWith('/api/create'));expect(creates).toHaveLength(1);expect(JSON.parse(creates[0][1]!.body as string)).toEqual({model:alias,from:sourceAlias,parameters:{num_ctx:16384,num_predict:4096,temperature:0.2},stream:false});expect(api.fetch.mock.calls.every(([url])=>!url.includes('/api/pull'))).toBe(true);
+  const creates=api.fetch.mock.calls.filter(([url,init])=>url.endsWith('/api/create')&&JSON.parse(init!.body as string).model===alias);expect(creates).toHaveLength(1);expect(JSON.parse(creates[0][1]!.body as string)).toEqual({model:alias,from:sourceAlias,parameters:{num_ctx:16384,num_predict:4096,temperature:0.2},stream:false});expect(api.fetch.mock.calls.every(([url])=>!url.includes('/api/pull'))).toBe(true);
  });
  it('rejects a repair whose recreated profile digest changes',async()=>{
   await imported();await profile();const api=inventory(true);await expect(ollama.models()).rejects.toThrow('Recreated local profile identity changed');expect(api.fetch.mock.calls.filter(([url])=>url.endsWith('/api/create'))).toHaveLength(1);

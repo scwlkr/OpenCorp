@@ -5,7 +5,11 @@ import { DomainError } from '../core/types.js';
 import { safeChild } from './workspaces.js';
 
 /** Use each repository's actual canonical check sequence at the artifact being checked. */
-export function canonicalVerification(productName: string, workspace: string, baseCommit?: string): string {
+export function canonicalVerification(productName: string, workspace: string, baseCommit?: string, registeredCommand?: string): string {
+  if (registeredCommand !== undefined) {
+    if (typeof registeredCommand !== 'string' || !registeredCommand.trim() || registeredCommand.length > 4000 || registeredCommand.includes('\0')) throw new DomainError('invalid_verifier', 'Registered verification command must be bounded nonempty text.');
+    return registeredCommand;
+  }
   switch (productName) {
     case 'WalkLang': {
       const workflow = parse(readFileSync(safeChild(workspace, join(workspace, '.github/workflows/ci.yml')), 'utf8'));

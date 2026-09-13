@@ -123,15 +123,15 @@ describe('queued dependency recovery',()=>{
   store.command(actor,{type:'assignment.update',assignmentId:waiting.id,status:'blocked',blockedReason:'Previously retained explanation',rationale:'Repeated old explanation'});expect(outcome().passed).toBe(false);
   store.command(actor,{type:'assignment.update',assignmentId:waiting.id,status:'cancelled',blockedReason:'New disposition without an evidence-based rationale'});expect(outcome().passed).toBe(false);
  });
- it('defers mixed recovery descendants and child votes without blocking an Elder\'s own original-vote recovery',()=>{
+ it.each(['dependency-wait','responsibility'])('defers %s recovery descendants and child votes without blocking an Elder\'s own original-vote recovery',lastKind=>{
   const elders=store.list('employees').filter(item=>store.level(item.id)==='elder'),[author,peer,third]=elders;
   const originalDecision=store.command(owner,{type:'decision.create',kind:'executive.review',subject:'Independent original review',rationale:'Actual fixture outcome',payload:{employeeId:ceo.id}});
   const original=store.command(owner,{type:'assignment.create',employeeId:author.id,supervisorId:author.id,kind:'governance',title:'Private original judgment',instructions:'Form an independent vote',acceptance:['Recorded original vote'],payload:{decisionId:originalDecision.id}});
   const derive=(source:Assignment,key:string)=>{
    const item=store.command(owner,{type:'assignment.create',employeeId:author.id,supervisorId:author.id,kind:'management',title:'Private derived judgment',instructions:'Inspect actual retained origin',acceptance:['Actual diagnosis']});
-   return store.update('assignments',item.id,{status:'completed',schedulerKey:key,payload:key.startsWith('fault:')?{failedAssignmentId:source.id}:{blockedAssignmentId:source.id}});
+   return store.update('assignments',item.id,{status:'completed',schedulerKey:key,payload:key.startsWith('fault:')?{failedAssignmentId:source.id}:key.startsWith('responsibility:')?{sourceAssignmentId:source.id}:{blockedAssignmentId:source.id}});
   };
-  const first=derive(original,'dependency-wait:first'),middle=derive(first,'fault:middle'),last=derive(middle,'dependency-wait:last');
+  const first=derive(original,'dependency-wait:first'),middle=derive(first,'fault:middle'),last=derive(middle,`${lastKind}:last`);
   expect(governanceDispatchAllowed(store,last)).toBe(true);expect(governanceDispatchAllowed(store,{...last,employeeId:peer.id})).toBe(false);
   const run=store.put('runs',{employeeId:author.id,assignmentId:last.id,modelId:author.modelId,policyRevision:store.policy.revision,workspace:root,sessionId:randomUUID(),status:'running',attempt:1,leaseUntil:new Date(Date.now()+60000).toISOString(),heartbeatAt:new Date().toISOString(),tokenRevoked:false});
   const actor:Actor={kind:'employee',employeeId:author.id,runId:run.id,policyRevision:store.policy.revision};

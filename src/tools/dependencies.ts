@@ -312,7 +312,8 @@ async function prepare(options: Options): Promise<DependencyResult> {
       // artifact import and successful Ruby/Bundler checks. It permits editing
       // dependency files, never an installed environment or canonical success.
       if (product === 'palettewow' && command.join(' ') === 'bundle install --local --jobs=4' && check.code === 16
-        && check.stderr.startsWith("The dependencies in your gemfile changed, but the lockfile can't be updated\nbecause frozen mode is set\n")) {
+        && ["The dependencies in your gemfile changed, but the lockfile can't be updated\nbecause frozen mode is set\n",
+          "Some dependencies were deleted from your gemfile, but the lockfile can't be\nupdated because frozen mode is set\n"].some(prefix => check.stderr.startsWith(prefix))) {
         result.repair = { kind: 'bundler_frozen_lock_mismatch', command: command.join(' '), code: 16,
           diagnostics: redact(`${check.stdout}\n${check.stderr}`).slice(0, 4000) };
       }

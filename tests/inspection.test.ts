@@ -27,13 +27,21 @@ beforeEach(()=>{
 afterEach(async()=>{await broker.cancel();store.close();rmSync(root,{recursive:true,force:true});});
 
 describe('complete exact-artifact inspection',()=>{
+ it('keeps complete review tools and scoped help without unrelated company operations',async()=>{
+  const tools=broker.toolsFor(actor),names=tools.map(tool=>tool.name);
+  for(const name of ['inspect_artifact','review_work','verify_product','company_detail','repo_issue','repo_read','browser','prepare_preview','send_message'])expect(names).toContain(name);
+  for(const name of ['commit_work','deliver_product','publish_release','create_assignment','adopt_internal_tool'])expect(names).not.toContain(name);
+  expect(JSON.stringify(tools).length).toBeLessThan(12000);
+  const help=await broker.call(actor,'company_help',{});expect(help).toContain(artifact.id);expect(help).toContain('unchanged acceptance');expect(help).not.toContain('recruitment');
+  await expect(review()).rejects.toThrow(/every inspect_artifact page/);
+ });
  it('finishes a normal small diff in one page but refuses legacy inspection claims',async()=>{
   store.update('runs',actor.runId,{inspectedArtifacts:[artifact.id],inspection:{artifactId:artifact.id,base:project.baseCommit,head:artifact.identity}});await expect(review()).rejects.toThrow(/every inspect_artifact page/);
   const page=await inspect();expect(page.diff).toContain('+Useful corrected source');expect(page).toMatchObject({offset:0,nextOffset:null,inspectionComplete:true,nextUninspectedOffset:null,base:project.baseCommit,head:artifact.identity});expect(page.contentIdentity).toBe(createHash('sha256').update(page.diff).digest('hex'));await review();expect(store.need('assignments',originalId).status).toBe('awaiting_review');
  });
- it('provides complete paged canonical check metadata behind an excerpted inspection summary',async()=>{
+ it('provides complete paged canonical check metadata through the inspection pointer',async()=>{
   const command='actual canonical argument '.repeat(1000),logPath='/owned/logs/'+ 'long-path-segment/'.repeat(100);artifact=store.update('artifacts',artifact.id,{checks:[{source:'canonical-verifier',identity:artifact.identity,status:'passed',command,logPath}],verification:{identity:artifact.identity,passed:true,receiptId:'fixture-canonical-receipt',command,logPath}});
-  const inspection=await inspect();expect(inspection.artifact.checks.truncated).toBe(true);expect(JSON.stringify(inspection).length).toBeLessThanOrEqual(12000);let offset:number|null=0,content='';
+  const inspection=await inspect();expect(JSON.stringify(inspection).length).toBeLessThanOrEqual(12000);let offset:number|null=0,content='';
   do{const page=await broker.call(actor,'company_detail',{...inspection.metadata,offset});content+=page.content;offset=page.nextOffset;}while(offset!==null);
   const full=JSON.parse(content);expect(full.checks[0]).toMatchObject({command,logPath,status:'passed'});expect(full.verification).toMatchObject({command,logPath,receiptId:'fixture-canonical-receipt'});
  });

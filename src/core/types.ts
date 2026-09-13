@@ -5,7 +5,7 @@ export type RunState = 'queued' | 'running' | 'cancelling' | 'succeeded' | 'fail
 export type Actor = { kind: 'owner' } | { kind: 'employee'; employeeId: string; runId: string; policyRevision: number };
 export interface RecordBase { id: string; createdAt: string; updatedAt: string; [key: string]: any }
 export interface Company extends RecordBase { name: string; state: CompanyLifecycle; bootstrap: string; mandate: string }
-export interface OwnerPolicy extends RecordBase { revision: number; spendingLimit: number; localOnly: boolean; maxInference: number; nativeJobs: number; maxRetries: number; maxCorrections: number; reassessMinutes: number; allowedRepositories: string[] }
+export interface OwnerPolicy extends RecordBase { revision: number; spendingLimit: number; localOnly: boolean; freeInferencePool?: boolean; openRouterFreeModels?: string[]; directFreeModels?: string[]; maxInference: number; maxProductiveTurns?: number; nativeJobs: number; maxRetries: number; maxCorrections: number; reassessMinutes: number; allowedRepositories: string[] }
 export interface Product extends RecordBase { name: string; repository: string; assessment: string; goals: any[]; roadmap: any[]; status: string; priority: number; rationale: string }
 export interface Department extends RecordBase { name: string; managerId: string; responsibilities: string }
 export type PositionLevel = 'elder' | 'ceo' | 'executive' | 'lead' | 'manager' | 'worker' | 'support';
@@ -36,3 +36,5 @@ export type TableName = keyof Tables;
 export interface CompanySnapshot { company: Company; policy: OwnerPolicy; products: Product[]; departments: Department[]; positions: Position[]; employees: Employee[]; appointments: Appointment[]; projects: Project[]; assignments: Assignment[]; runs: EmployeeRun[]; decisions: Decision[]; votes: Vote[]; artifacts: Artifact[]; reviews: Review[]; messages: Message[]; actions: ExternalAction[]; knowledge: Knowledge[]; models: ModelProfile[]; integrations: Integration[]; attention: Attention[]; experiences: RecordBase[]; roleVersions: RecordBase[]; events: CompanyEvent[]; resources: Record<string, any> }
 export interface CorporateCommand { type: string; [key: string]: any }
 export class DomainError extends Error { constructor(public code: string, message: string, public status = 400) { super(message); this.name = 'DomainError'; } }
+
+export const POSITION_LEVEL_RANK: Record<PositionLevel, number> = {elder: 0, ceo: 1, executive: 2, lead: 3, manager: 4, worker: 5, support: 5};

@@ -1,0 +1,33 @@
+import { afterEach,expect,it,vi } from 'vitest';
+import { mkdtemp,mkdir,writeFile,rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { OwnedOllama,microInstallSelection,localArtifactIdentity } from '../src/runtime/ollama.js';
+import { LocalRuntime } from '../src/runtime/index.js';
+import { MODEL_ALIASES } from '../src/runtime/types.js';
+const roots:string[]=[];
+afterEach(async()=>{vi.restoreAllMocks();vi.unstubAllGlobals();await Promise.all(roots.splice(0).map(root=>rm(root,{recursive:true,force:true})));});
+it('preserves default downloads and admits only explicit exact micro candidates before starting processes',async()=>{
+ expect(microInstallSelection()).toEqual(['micro-06','micro-17']);expect(MODEL_ALIASES['micro-4']).toBe('qwen3:4b-instruct');
+ const options={dataRoot:'/unused-fixture'},runtime=new LocalRuntime(options),start=vi.spyOn(runtime,'start').mockResolvedValue();
+ for(const ids of [[],['small'],['qwen3:4b'],['micro-4','micro-4'],['paid/model']])await expect(runtime.installMicroModels(ids)).rejects.toThrow('exact micro');
+ expect(start).not.toHaveBeenCalled();
+ const pool=new OwnedOllama(options,'micro'),ensure=vi.spyOn(pool as any,'ensureModel').mockResolvedValue(undefined);
+ await pool.ensureMicroModels();expect(ensure.mock.calls.map(call=>call[0])).toEqual(['micro-06','micro-17']);
+ ensure.mockClear();await pool.ensureMicroModels(['micro-4']);expect(ensure.mock.calls).toEqual([['micro-4']]);
+});
+it.each(['micro-06','micro-17','micro-4'] as const)('applies only the explicit %s artifact budget and retains verified16K no-thinking identity',async id=>{
+ const root=await mkdtemp(join(tmpdir(),'opencorp-micro-profile-'));roots.push(root);
+ const pool=new OwnedOllama({dataRoot:root},'micro'),alias=`opencorp-${id}-16384:latest`,source=MODEL_ALIASES[id];
+ await mkdir(pool.root,{recursive:true});await writeFile(join(pool.root,`${id}-16384.source`),'source-digest');
+ vi.spyOn(pool,'start').mockResolvedValue();
+ let size=2.5*1024**3;
+ vi.spyOn(pool as any,'tags').mockImplementation(async()=>[{name:source,digest:'source-digest',size},{name:alias,digest:'profile-digest',size}]);
+ const manifest=vi.spyOn(pool as any,'checkedManifest').mockResolvedValue(Buffer.from('verified fixture manifest'));
+ vi.stubGlobal('fetch',vi.fn(async()=>Response.json({template:'fixture template',parameters:'num_ctx 16384\nnum_predict 4096\ntemperature 0.2',capabilities:['tools']})));
+ if(id!=='micro-4'){await expect(pool.models()).rejects.toThrow('artifact budget');expect(manifest).not.toHaveBeenCalled();return;}
+ const [model]=await pool.models();expect(model).toMatchObject({id,sourceAlias:'qwen3:4b-instruct',alias,contextTokens:16384,sizeClass:'micro',inferenceProfile:{id:'qwen-no-thinking-v1',reasoningEffort:'none'}});
+ expect(manifest).toHaveBeenCalledWith(alias,'profile-digest');expect(model.artifactIdentity).toBe(localArtifactIdentity(model));
+ expect(model.artifactIdentity).not.toBe(localArtifactIdentity({...model,manifestDigest:'changed'}));
+ size=3*1024**3+1;await expect(pool.models()).rejects.toThrow('artifact budget');
+});

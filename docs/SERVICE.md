@@ -1,5 +1,7 @@
 # User service installation and replacement
 
+This is the current macOS service behavior. The [implementation plan](https://github.com/scwlkr/OpenCorp/issues/1) covers future operating modes and messaging integration; service installation does not implement those capabilities.
+
 `opencorp service install` installs the company LaunchAgent using the pinned Node executable and absolute application paths. Reinstallation preserves the company database, workspaces, and persisted running/paused/stopped policy. It does not send a company start or resume command. Existing unrelated files or symlinks at `~/.local/bin/opencorp` remain protected by the existing installation check.
 
 Replacement reconciles launchd registration rather than treating every nonzero `launchctl` exit as absence:

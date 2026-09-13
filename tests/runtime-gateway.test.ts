@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -9,10 +9,10 @@ import type { LocalModel, RuntimeEvent } from '../src/runtime/types.js';
 // Exact source fixture, without its surrounding TypeScript string declaration:
 // https://github.com/anomalyco/opencode/blob/v1.18.30/packages/core/src/session/runner/max-steps.ts
 const maxSteps = await readFile(new URL('./fixtures/opencode-1.18.30-max-steps.txt', import.meta.url), 'utf8');
-const model = { id: 'small', alias: 'opencorp-small-fixture', contextTokens: 16384, artifactIdentity: 'fixture-artifact' } as LocalModel;
+const model = { provider: 'ollama', local: true, id: 'small', alias: 'opencorp-small-fixture', contextTokens: 16384, artifactIdentity: 'fixture-artifact' } as LocalModel;
 
 type Message = { role: string; content: string; tool_calls?: unknown[] };
-async function fixture(selectedModel: LocalModel = model, enforceAssistantPrefill = false) {
+async function fixture(selectedModel: LocalModel = model, enforceAssistantPrefill = false, provisionOnly = false) {
   const seen: Array<{ messages: Message[]; reasoning?: unknown; reasoning_effort?: unknown; max_tokens?: number }> = [];
   const upstream = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -31,7 +31,7 @@ async function fixture(selectedModel: LocalModel = model, enforceAssistantPrefil
   const events: RuntimeEvent[] = [];
   const system = 'Employee fixture-authority. Zero approved spending. Persist actual work.';
   const gateway = new RunGateway({ url: `http://127.0.0.1:${address.port}`, verifyIdentity: async () => {} } as unknown as OwnedOllama,
-    selectedModel, { runId: 'native-limit-fixture', employeeId: 'employee', workspace: '/unused', modelId: 'small', system, prompt: '' }, event => events.push(event));
+    selectedModel, { runId: 'native-limit-fixture', employeeId: 'employee', workspace: '/unused', modelId: 'small', system, prompt: '',...(provisionOnly?{corporateOnly:true,provisionOnly:true}:{}) }, event => events.push(event));
   await gateway.start(); gateway.sessionId = 'bound';
   return { gateway, events, seen, system, upstreamUrl: `http://127.0.0.1:${address.port}`,
     request: (messages: Message[], withTools = true, overrides: Record<string, unknown> = {}) => fetch(`${gateway.url}/v1/chat/completions`, {
@@ -126,9 +126,9 @@ describe('actual gateway assistant-prefill dispatch', () => {
 });
 
 describe('owned Qwen inference profile', () => {
-  it('enforces none for employee and compaction requests despite competing nested reasoning', async () => {
-    const inferenceProfile = localInferenceProfile('qwen-main');
-    const f = await fixture({ ...model, id: 'qwen-main', alias: 'opencorp-qwen-fixture', inferenceProfile });
+  it.each(['qwen-main', 'qwen-low-reasoning-48k'])('enforces the selected %s profile for employee and compaction requests despite competing nested reasoning', async id => {
+    const inferenceProfile = localInferenceProfile(id);
+    const f = await fixture({ ...model, id, alias: 'opencorp-qwen-fixture', inferenceProfile });
     try {
       for (const withTools of [true, false]) {
         expect((await f.request([{ role: 'user', content: 'Fixture request' }], withTools,
@@ -136,7 +136,7 @@ describe('owned Qwen inference profile', () => {
       }
       expect(f.seen).toHaveLength(2);
       for (const request of f.seen) {
-        expect(request.reasoning_effort).toBe('none'); expect(request).not.toHaveProperty('reasoning');
+        expect(request.reasoning_effort).toBe(inferenceProfile!.reasoningEffort); expect(request).not.toHaveProperty('reasoning');
         expect(request.max_tokens).toBe(4096);
       }
       expect(f.gateway.usage.requests).toBe(2); expect(f.gateway.stepCount).toBe(1);
@@ -210,4 +210,39 @@ describe('pinned native agent-limit observation', () => {
       expect(JSON.stringify(events)).not.toContain(f.system);
     } finally { await f.close(); }
   });
+});
+
+it('caps only trusted provision output while ignoring worker attempts to select that scope',async()=>{
+ for(const trusted of [false,true]){const f=await fixture(model,false,trusted);try{const response=await f.request([{role:'user',content:'Finish'}],false,{max_tokens:9999,provisionOnly:true});expect(response.status).toBe(200);expect(f.seen[0].max_tokens).toBe(trusted?1024:4096);}finally{await f.close();}}
+});
+
+import {DirectFree} from '../src/runtime/direct-free.js';
+import {PassThrough} from 'node:stream';
+it('omits Z.ai tool fields only for tool-free/final requests and refuses unsupported ordinary choice',async()=>{
+ const provider=new DirectFree('zai',{modelIds:['zai:glm-4.7-flash'],readCredentials:async()=>{throw new Error('No real credentials');}}),seen:any[]=[];
+ const inference=vi.spyOn(provider,'infer').mockImplementation(async(_model,body)=>{seen.push(body);const stream=new PassThrough() as any;stream.statusCode=200;stream.headers={'content-type':'text/event-stream'};queueMicrotask(()=>stream.end('data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\n'));return stream;});
+ const selected={id:'zai:glm-4.7-flash',alias:'zai:glm-4.7-flash',provider:'zai',local:false,artifactIdentity:'fixture'} as any,gateway=new RunGateway(provider,selected,{runId:'zai-choice',employeeId:'employee',workspace:'/unused',modelId:selected.id,system:'',prompt:''},()=>{});await gateway.start();gateway.sessionId='bound';
+ const request=(tools:any[],choice:unknown,messages:any[]=[{role:'user',content:'Fixture'}])=>fetch(`${gateway.url}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${gateway.secret}`},body:JSON.stringify({model:selected.alias,messages,tools,tool_choice:choice})});
+ const tools=[{type:'function',function:{name:'read',parameters:{}}}];
+ try{
+  expect((await request(tools,'auto')).status).toBe(200);expect(seen.at(-1).tool_choice).toBe('auto');expect(seen.at(-1).tools).toHaveLength(1);
+  expect((await request([],'none')).status).toBe(200);expect(seen.at(-1).tool_choice).toBeUndefined();expect(seen.at(-1).tools).toBeUndefined();
+  const before=seen.length;for(const choice of ['none','required',{type:'function',function:{name:'read'}}])expect((await request(tools,choice)).status).not.toBe(200);expect(seen).toHaveLength(before);
+  expect((await request(tools,'none',[{role:'assistant',content:maxSteps}])).status).toBe(200);expect(seen.at(-1).tools).toBeUndefined();expect(gateway.nativeStepLimit).toBeDefined();
+ }finally{await gateway.close();inference.mockRestore();}
+});
+
+import { FreeInferencePool } from '../src/runtime/free-pool/pool.js';
+import { PoolUnavailableError } from '../src/runtime/free-pool/types.js';
+it.each([{prior:false,wait:3600000,eligible:true},{prior:true,wait:3600000,eligible:true},{prior:false,wait:30000,eligible:true},{prior:true,wait:30000,eligible:true},{prior:false,wait:30000,eligible:false}])('retains untouched capacity deferral while preserving later short retries: %j',async({prior,wait,eligible})=>{
+ const retryAt=Date.now()+wait,pool=Object.create(FreeInferencePool.prototype) as FreeInferencePool;
+ pool.generate=vi.fn(async()=>{throw new PoolUnavailableError(retryAt);});
+ const gateway=new RunGateway(pool,{...model,provider:'pool',local:false} as any,{runId:'capacity-fixture',employeeId:'employee',workspace:'/unused',modelId:'free-pool',freeInferencePool:true,deferInitialPoolWait:eligible,system:'',prompt:''},()=>{});
+ await gateway.start();gateway.sessionId='bound-capacity-fixture';
+ const call=()=>fetch(`${gateway.url}/v1/chat/completions`,{method:'POST',headers:{authorization:`Bearer ${gateway.secret}`},body:JSON.stringify({model:model.alias,messages:[{role:'user',content:'Synthetic fixture'}],tools:[]})});
+ try{
+  if(prior){vi.mocked(pool.generate).mockResolvedValueOnce({id:'synthetic',model:'synthetic:free',choices:[{index:0,finish_reason:'stop',message:{role:'assistant',content:'Actual prior output'}}],usage:{prompt_tokens:1,completion_tokens:1}} as any);expect((await call()).status).toBe(200);}
+  const response=await call(),retry=(prior||!eligible)&&wait<240000;expect(response.status).toBe(retry?429:400);expect((await response.json()).error.code).toBe(retry?undefined:'provider_capacity_wait');
+  expect(gateway.firstRequestCapacityWait).toEqual(prior||retry?undefined:{provider:'free-pool',retryAt:new Date(retryAt).toISOString()});
+ }finally{await gateway.close();}
 });
