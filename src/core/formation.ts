@@ -52,6 +52,7 @@ export function retainedOfficeProposal(store:CompanyStore,assignment:Assignment)
 /** Accepted onboarding still owes the lead handoff while its original remit remains current. */
 function onboardingReady(store:CompanyStore,employee:Employee,managerId:string){
  if(employee.onboarding?.status!=='accepted')return false;
+ if(store.company.direction==='software-factory')return true;
  const req=store.get('experiences',employee.requisitionId),department=req?store.get('departments',req.departmentId):undefined;
  const position=store.get('positions',employee.positionId);
  // Later dismissal, reassignment or restructuring must not restore an old reporting plan.
@@ -159,7 +160,7 @@ function coalesceFreshDepartments(store:CompanyStore,runs:ReadonlySet<string>){
 }
 
 export function reconcileFormation(store:CompanyStore){
- if(!store.company.expansion||store.company.state!=='running')return;
+ if((!store.company.expansion&&store.company.direction!=='software-factory')||store.company.state!=='running')return;
  // This synchronous pass only creates/updates assignments; recruitment records change between passes.
  const experiences=store.list('experiences'),runs=store.list('runs'),dispatched=new Set(runs.map(r=>r.assignmentId));
  const held=new Set(runs.filter(r=>['running','cancelling','uncertain'].includes(r.status)).map(r=>r.assignmentId));
@@ -201,8 +202,11 @@ export function reconcileFormation(store:CompanyStore){
  }
  for(const employee of employees.filter(e=>e.requisitionId&&['pending','accepted'].includes(e.onboarding?.status))){
   const prior=store.assignmentBySchedulerKey(`formation:onboard:${employee.id}`);
+  if(store.company.direction==='software-factory'&&prior&&['queued','blocked'].includes(prior.status)&&!held.has(prior.id)&&!prior.factoryOnboardingMigration&&prior.instructions.includes('If this is a departmental lead, use department.update')){
+   store.update('assignments',prior.id,{instructions:`Inspect employee ${employee.id}, its candidate and onboarding instructions. Assign useful first work or record an honest standby condition, then use recruitment.onboard if acceptance is still pending. Choose reporting changes only when useful within your authority; onboarding does not require transferring department responsibility or moving colleagues. Preserve existing commitments and summarize the actual result.`,factoryOnboardingMigration:{at:new Date().toISOString(),previousInstructions:prior.instructions}});
+  }
   const manager=store.get('employees',prior?.employeeId??employee.homeManagerId!);if(!manager||manager.status!=='active'||onboardingReady(store,employee,manager.id))continue;
-  enqueueCompanyWork(store,manager,`formation:onboard:${employee.id}`,`Accept and activate ${employee.name}`,`Inspect employee ${employee.id}, its candidate and onboarding instructions. Assign useful first work with assignment.create or explicitly record a standbyCondition, then recruitment.onboard {employeeId:"${employee.id}",rationale:your actual acceptance,standbyCondition:if applicable}. If this is a departmental lead, use department.update managerId ${employee.id} to transfer departmental responsibility, then employee.reassign to move this department's specialists who report directly to you under the new lead. Preserve their identities, existing project supervisors and assignments; do not move staff outside your authority. Standing remit work will activate the department. No fictional completed work or customers.`,60);
+  enqueueCompanyWork(store,manager,`formation:onboard:${employee.id}`,`Accept and activate ${employee.name}`,`Inspect employee ${employee.id}, its candidate and onboarding instructions. Assign useful first work with assignment.create or explicitly record a standbyCondition, then recruitment.onboard {employeeId:"${employee.id}",rationale:your actual acceptance,standbyCondition:if applicable}. ${store.company.direction==='software-factory'?'Choose reporting changes only if useful; accepted onboarding does not require moving colleagues.':`If this is a departmental lead, use department.update managerId ${employee.id} to transfer departmental responsibility, then employee.reassign to move this department's specialists who report directly to you under the new lead. Preserve their identities, existing project supervisors and assignments; do not move staff outside your authority. Standing remit work will activate the department.`} No fictional completed work or customers.`,60);
  }
  if(recruiter)for(const department of store.list('departments').filter(d=>d.status!=='retired'&&d.charter)){
   const manager=store.get('employees',department.managerId);if(!manager||manager.status!=='active')continue;
@@ -228,7 +232,7 @@ export function reconcileFormation(store:CompanyStore){
 }
 
 export function reconcileStandingDuties(store:CompanyStore,now=Date.now()){
- if(!store.company.expansion||store.company.state!=='running')return;
+ if((!store.company.expansion&&store.company.direction!=='software-factory')||store.company.state!=='running')return;
  // Each duty has a distinct department/index key; newly queued work cannot be another duty's prior.
  const assignments=store.list('assignments');
  for(const department of store.list('departments').filter(d=>d.status!=='retired'&&d.standingDuties?.length)){

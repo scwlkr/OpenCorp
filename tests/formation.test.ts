@@ -351,3 +351,17 @@ test('an actual executive transfer creates one new vacancy obligation without re
  store.command(owner,{type:'decision.create',kind:'executive.appoint',subject:'Pending new CPO',rationale:'Actual pending proposal suppresses further requests',payload:{positionId:cpo.id,name:'New candidate',modelId:'fixture',role:'Product ownership'}});
  reconcileFormation(store);expect(store.list('assignments').filter(a=>a.schedulerKey?.startsWith('formation:office:Chief Product Officer'))).toHaveLength(2);
 });
+
+test('factory migration revises retained onboarding without moving employees or losing the prior remit',()=>{
+ const f=onboardingFixture();store.update('runs',f.run.id,{status:'succeeded'});const prior=store.need('assignments',f.task.id),employees=store.list('employees'),appointments=store.list('appointments');
+ store.update('company',store.company.id,{direction:'software-factory'});
+ reconcileFormation(store);reconcileFormation(store);
+ const retained=store.need('assignments',prior.id);
+ expect(retained.factoryOnboardingMigration.previousInstructions).toBe(prior.instructions);
+ expect(retained.instructions).not.toBe(prior.instructions);
+ expect(retained.acceptance).toEqual(prior.acceptance);
+ expect(retained.status).toBe(prior.status);
+ expect(store.list('employees')).toEqual(employees);expect(store.list('appointments')).toEqual(appointments);
+ store.update('employees',f.employee.id,{onboarding:{status:'accepted'}});
+ expect(formationOutcome(store,retained,{} as any).passed).toBe(true);
+});

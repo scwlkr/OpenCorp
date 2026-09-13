@@ -1,0 +1,13 @@
+# Management-led work
+
+Managers receive the shared [management guide](../skills/management.md) alongside their approved employee skill and current mandate. It covers choosing an audience and need, proportional research, staffing, delegation, review and lifecycle ownership. Existing company records and tools carry out those decisions; no required department roster, staffing count or product count defines completion.
+
+Use ordinary position, hiring, reassignment, assignment and skill commands within existing authority. Recruitment remains an optional sourcing capability with its existing manager authorization; executive appointments still require the three Elders' independent judgments. In software-factory companies, accepted onboarding does not force a departmental reporting reshuffle. Pending legacy onboarding instructions are reconciled before dispatch with their previous text retained; identities, assignments and acceptance stay intact. Existing management-authored standing duties also run without the obsolete expansion flag.
+
+`send_message` sends a direct colleague request or result and queues a recipient turn in the same transaction. `wake:false` retains information without requesting a turn; self messages do not wake. The recipient decides what action is appropriate. Message turns run in the recipient's company workspace and grant no project access or staffing authority. Existing governance isolation follows the originating run, including its recovery and message descendants.
+
+A recipient can record a concise no-action disposition without inventing an unrelated company mutation. An ordinary assessment or management assignment may produce an authored handoff to another employee. Neither case establishes implementation, review, release or adoption; those retain their existing evidence boundaries. Completed work reports to its accountable assignment supervisor. Incoming-message dispositions and Owner conversations do not automatically trigger another response turn, preventing notification loops.
+
+Only new sends create message turns; old messages remain history. Pending message turns survive restart as ordinary assignments. Work, due responsibilities and recovered provider capacity use the existing queue and admission controls. An idle employee has no independent polling inference; leadership can have a due strategic review. Pending recruitment and useful retained commitments remain intact.
+
+Observe leadership choose a real need, staff it and inspect an employee result. Narrow automated checks establish persistence, isolation and loop prevention, not management quality or indefinite autonomy.

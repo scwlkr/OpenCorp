@@ -157,7 +157,7 @@ describe('durable dispatch boundaries',()=>{
     ['Acknowledge this controls check only.','Acknowledged.'],
     ['Explain which artifacts support the current project result.','No artifacts have been recorded in this fixture; there is no completed product outcome to report.'],
   ])('guides and persists an internal Owner final reply for %s',async(content,text)=>{
-    const message=store.command(owner,{type:'message.send',recipientId:run.employeeId,content});
+    const message=store.command(owner,{type:'message.send',recipientId:run.employeeId,content,wake:false});
     store.update('assignments',assignment.id,{kind:'conversation',status:'running',instructions:`Owner message ${message.id}: ${content}\nRespond through message.send with recipientId omitted (CEO) or in your final answer.`,payload:{messageId:message.id}});
     const result:RuntimeResult={sessionId:'session',text,modelId:'qwen-main',artifactIdentity:'fixture-local-model',usage:{inputTokens:20,outputTokens:10,requests:1,durationMs:10},messagesPath:join(root,'fixture-messages.json'),diagnosticsPath:join(root,'fixture-diagnostics.json'),completion:{finishReason:'stop',continuations:0,outputLimit:4096,exhausted:false}};
     const execute=vi.fn(async(_request:any)=>result),broker=new CorporateBroker(store,root),call=vi.spyOn(broker,'call'),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,broker,'http://localhost');
@@ -261,8 +261,22 @@ describe('shared staffing decisions',()=>{
   it('queues one home-manager decision and requires that actual acceptance for completion',()=>{
     const {worker,work,request,homeRun,homeActor,requestActor}=setup();expect(managementOutcome(store,request,homeRun).passed).toBe(false);
     expect(()=>store.command(requestActor,{type:'assignment.accept',assignmentId:work.id,accept:true})).toThrow(/home management/);
+    const workerRun=store.put('runs',{...homeRun,id:undefined,sessionId:randomUUID(),employeeId:worker.id});
+    expect(()=>store.command({kind:'employee',employeeId:worker.id,runId:workerRun.id,policyRevision:store.policy.revision},{type:'assignment.accept',assignmentId:work.id,accept:true})).toThrow(/home management/);
     store.command(homeActor,{type:'assignment.accept',assignmentId:work.id,accept:true,rationale:'Existing commitment completed; capacity available'});
     expect(managementOutcome(store,request,store.need('runs',homeRun.id)).passed).toBe(true);expect(store.need('assignments',work.id).accepted).toBe(true);expect(store.need('employees',worker.id).homeManagerId).toBe(homeActor.kind==='employee'?homeActor.employeeId:undefined);
+  });
+  it('routes managerless staffing to voluntary recipient consent without giving the requester authority',()=>{
+    const elder=store.list('employees').find(e=>store.level(e.id)==='elder')!;
+    const work=store.command(actor,{type:'assignment.create',employeeId:elder.id,title:'Independent strategy advice',instructions:'Assess the useful scope independently',acceptance:['Source-linked advice'],kind:'assessment'});
+    const scheduler=new Scheduler(store,{} as LocalRuntime,new CorporateBroker(store,root),'http://localhost');(scheduler as any).reconcileOrganization();(scheduler as any).reconcileOrganization();
+    const requests=store.list('assignments').filter(a=>a.schedulerKey?.startsWith(`staffing:${work.id}:`));expect(requests).toHaveLength(1);
+    expect(requests[0].employeeId).toBe(elder.id);expect(store.need('assignments',work.id).accepted).toBe(false);
+    expect(()=>store.command(actor,{type:'assignment.accept',assignmentId:work.id,accept:true})).toThrow(/home management/);
+    const consentRun=store.put('runs',{...run,id:undefined,sessionId:randomUUID(),employeeId:elder.id,assignmentId:requests[0].id});
+    store.command({kind:'employee',employeeId:elder.id,runId:consentRun.id,policyRevision:store.policy.revision},{type:'assignment.accept',assignmentId:work.id,accept:true,rationale:'Independent advice is useful and capacity is available'});
+    expect(store.need('assignments',work.id).accepted).toBe(true);expect(store.need('employees',elder.id).homeManagerId).toBeNull();
+    expect(managementOutcome(store,requests[0],store.need('runs',consentRun.id)).passed).toBe(true);
   });
   it('preserves a declined staffing decision and routes the conflict back to its requester',()=>{
     const {work,scheduler,request,homeRun,homeActor}=setup();
