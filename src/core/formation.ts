@@ -170,7 +170,7 @@ export function reconcileFormation(store:CompanyStore){
  const employees=store.list('employees').filter(e=>e.status==='active'),positions=store.list('positions');
  const ceo=employees.find(e=>store.level(e.id)==='ceo');if(!ceo)return;
  const exact=(title:string)=>employees.find(e=>store.level(e.id)==='executive'&&positions.find(p=>p.id===e.positionId)?.title===title);
- for(const [title,coverage] of Object.entries(departmentalCoverage)){
+ for(const [title,coverage] of Object.entries(store.company.direction==='software-factory'?{}:departmentalCoverage)){
   const executive=exact(title);
   if(!executive){
    const proposals=store.list('decisions').filter(d=>d.kind==='executive.appoint'&&store.get('positions',d.payload?.positionId)?.title===title);
@@ -196,7 +196,7 @@ export function reconcileFormation(store:CompanyStore){
  const people=exact('Chief People Officer');
  const recruitment=store.list('departments').find(d=>d.name==='Recruitment & Workforce Planning'&&d.status!=='retired');
  const recruiter=recruitmentOfficer(store);
- if(people&&recruitment&&!recruiter){
+ if(store.company.direction!=='software-factory'&&people&&recruitment&&!recruiter){
   enqueueCompanyWork(store,people,'formation:recruiter-bootstrap','Bootstrap the Recruitment Officer',`As authorized home manager bootstrap the first persistent Recruitment Officer in department ${recruitment.id}; this resolves recruitment's circular dependency. Discover source agency via skill_discover query recruitment, import the relevant role with skill_import and inspect all pages; also discover skills and inspect the find-skills competency. Adapt human salary/interview/platform instructions into local AI candidate profiling and useful onboarding. Use company_command with command.type position.create, title exactly Recruitment Officer, level worker or support, departmentId ${recruitment.id} and tailored responsibilities unless that departmental position already exists. Then company_command employee.hire with that positionId, homeManagerId ${people.id}, your locally authored name and tailored role, permitted local modelId and source references in source. State that it only provisions manager-approved requisitions; executives still require Elder votes. Do not hire the entire company yourself.`,70);
  }
  for(const employee of employees.filter(e=>e.requisitionId&&['pending','accepted'].includes(e.onboarding?.status))){
@@ -207,7 +207,7 @@ export function reconcileFormation(store:CompanyStore){
  if(recruiter)for(const department of store.list('departments').filter(d=>d.status!=='retired'&&d.charter)){
   const manager=store.get('employees',department.managerId);if(!manager||manager.status!=='active')continue;
   const vacancies=positions.filter(p=>p.departmentId===department.id&&p.status==='active'&&!['ceo','executive','elder'].includes(p.level)&&!employees.some(e=>e.positionId===p.id));
-  for(const position of vacancies){
+  for(const position of store.company.direction==='software-factory'?[]:vacancies){
    if(experiences.some(r=>r.kind==='requisition'&&r.positionId===position.id&&r.status!=='cancelled'&&r.departmentManagerId===department.managerId))continue;
    enqueueCompanyWork(store,manager,`formation:request:${position.id}:${department.managerId}`,`Authorize recruitment: ${position.title}`,`Position ${position.id}, ${position.title}, is vacant in ${department.name}. Read its responsibilities and the department charter. Use company_read employees and positions to inspect active Recruitment worker/support staff, their current roles and assigned work. Choose a suitable Recruitment Officer or assistant based on remit and capacity; Recruitment Officer ${recruiter.id} is the fallback when no suitable assistant is available. Author recruitment.request with positionId ${position.id}, homeManagerId ${manager.id}, your chosen recruiterId, a specific brief and useful firstWork or honest standby condition. This scopes Recruitment's authority; you will approve its candidate. Do not hire an unadapted generic profile.`,56);
   }

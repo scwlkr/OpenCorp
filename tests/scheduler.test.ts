@@ -143,7 +143,7 @@ describe('corporate-only formation dispatch',()=>{
 
 describe('durable dispatch boundaries',()=>{
   it('uses the tailored expansion role and selected references without a generic hierarchy seed',async()=>{
-    store.command(owner,{type:'company.expand',mandate:'Form specialist departments through actual recruitment'});
+    store.update('company',store.company.id,{direction:undefined});store.command(owner,{type:'company.expand',mandate:'Form specialist departments through actual recruitment'});
     store.command(owner,{type:'role.update',employeeId:run.employeeId,content:'Own tailored workforce competency adaptation and onboarding.',source:'Pinned competencies',rationale:'Tailor the skill'});
     store.update('employees',run.employeeId,{competencies:['candidate adaptation'],sourceIds:['pinned-recruitment-source']});
     const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture stops at runtime dispatch');}),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
@@ -298,7 +298,7 @@ const outcome=()=>managementOutcome(store,store.need('assignments',assignment.id
 
 describe('management completion requires actual outcomes',()=>{
   it.each(['revised proposal','withdrawal','replacement pending','replacement approved','replacement rejected'])('routes a rejected appointment once and requires an evidenced current-run %s',correctionKind=>{
-    store.command(owner,{type:'company.expand',mandate:'Form governed specialized departments'});
+    store.update('company',store.company.id,{direction:undefined});store.command(owner,{type:'company.expand',mandate:'Form governed specialized departments'});
     const position=store.command(actor,{type:'position.create',title:'Chief Technology Officer',level:'executive',responsibilities:'Own useful product delivery'}),proposal={positionId:position.id,name:'Proposed executive',modelId:model,role:'Initial delivery scope'};
     const decision=store.command(actor,{type:'decision.create',kind:'executive.appoint',subject:'Initial executive appointment',rationale:'Concrete delivery ownership',payload:proposal});
     const scheduler=new Scheduler(store,{} as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
@@ -654,7 +654,7 @@ it('does not dispatch an application correction to an unvoted Elder after an Own
 
 describe('formation receipt-based ending instructions',()=>{
  it.each([true,false])('explains ending while the actual bootstrap checkpoint enforces retained hire=%s',async hasHire=>{
-   store.command(owner,{type:'company.expand',mandate:'Resume real recruitment formation'});
+   store.update('company',store.company.id,{direction:undefined});store.command(owner,{type:'company.expand',mandate:'Resume real recruitment formation'});
    const department=store.command(owner,{type:'department.create',name:'Recruitment & Workforce Planning',managerId:run.employeeId,responsibilities:'Scoped recruitment'});
    const position=store.command(owner,{type:'position.create',title:'Recruitment Officer',level:'worker',departmentId:department.id,responsibilities:'Adapt narrow source competencies'});
    if(hasHire)store.command(owner,{type:'employee.hire',name:'Retained recruiter',positionId:position.id,homeManagerId:run.employeeId,modelId:model,role:'Source and adapt competencies under managerial authority'});

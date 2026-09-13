@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { factoryMandate, migrateCompanyDirection } from '../core/company-direction.js';
 import type { ProviderBackoff } from '../core/provider-backoff.js';
 import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
@@ -82,7 +83,7 @@ export class CompanyStore {
   bootstrap(): CompanySnapshot {
     this.db.transaction(() => {
       if (this.list('company').length) return;
-      const company = this.put('company', {name: 'OpenCorp', state: 'forming', bootstrap: 'founders-created', mandate: 'Independently manage and develop WalkLang, paletteWOW, and OpenJob. Leadership chooses strategy, staffing and subsequent useful work. Autonomous reviewed merges, zero-incremental-cost releases and product communications are authorized. New spending requires explicit Owner approval. All employee inference runs locally.'});
+      const company = this.put('company', {name: 'OpenCorp', state: 'forming', bootstrap: 'founders-created', direction:'software-factory', mandate: factoryMandate()});
       this.put('policy', {companyId: company.id, revision: 1, spendingLimit: 0, localOnly: true, maxInference: 1, nativeJobs: 1, maxRetries: 1, maxCorrections: 2, reassessMinutes: 30, allowedRepositories: [resolve(homedir(), 'Desktop/dev/WalkLang'), resolve(homedir(), 'Desktop/dev/paletteWOW'), resolve(homedir(), 'Desktop/dev/openjob')]});
       for (const [name, repository] of [['WalkLang',resolve(homedir(), 'Desktop/dev/WalkLang')], ['paletteWOW',resolve(homedir(), 'Desktop/dev/paletteWOW')], ['OpenJob',resolve(homedir(), 'Desktop/dev/openjob')]]) this.put('products', {name, repository, assessment: '', goals: [], roadmap: [], status: 'unassessed', priority: 0, rationale: ''});
       for (const [name, title, level, modelId] of [['Mara Chen','Elder — Product Judgment','elder',LARGE], ['Elias Stone','Elder — Engineering Judgment','elder',ALTERNATIVE], ['Priya Shah','Elder — Operational Judgment','elder',LARGE], ['Alex Mercer','Chief Executive Officer','ceo',LARGE]] as const) {
@@ -239,6 +240,7 @@ export class CompanyStore {
     const result = this.db.transaction(() => this.executeCommand(actor,command))();
     if (actor.kind==='employee') { const run=this.need('runs',actor.runId); this.update('runs',run.id,{corporateCommands:[...(run.corporateCommands ?? []),{type:command.type,id:result?.id ?? null,at:NOW()}]}); }
     this.emit(command.type, {actorId: actor.kind === 'owner' ? 'owner' : actor.employeeId, runId:actor.kind==='employee'?actor.runId:null, id: result?.id ?? null});
+    if(command.type==='company.migrate')this.vault.syncMandate();
     if (/employee|role|department|project/.test(command.type)) this.vault.syncProfiles();
     return result;
   }
@@ -268,7 +270,9 @@ export class CompanyStore {
     if(c.type.startsWith('workplace.'))return workplaceCommand(this,actor,c);
     if (['department.update','department.merge','position.update','recruitment.request','recruitment.candidate','recruitment.approve','recruitment.reject','recruitment.onboard'].includes(c.type)) return organizationCommand(this,actor,c);
     switch (c.type) {
+      case 'company.migrate': return migrateCompanyDirection(this,actor);
       case 'company.expand': {
+        if(this.company.direction==='software-factory')throw new DomainError('obsolete_direction','Company direction is already migrated; use existing management tools for useful staffing',409);
         if(actor.kind!=='owner')throw new DomainError('owner_required','Only the Owner activates the expansion contract',403);
         return this.update('company',this.company.id,{expansion:{contract:'OpenCorp_Build_Plan.md foundational expansion 2026-09-11',startedAt:this.company.expansion?.startedAt??NOW()},mandate:required(c.mandate,'Expansion mandate')});
       }
@@ -592,6 +596,7 @@ export class CompanyStore {
   private changeAssignment(actor: Actor,c: CorporateCommand) {
     const assignment=this.need('assignments',c.assignmentId);
     if (actor.kind!=='owner' && actor.employeeId!==assignment.supervisorId && !this.canManage(actor,assignment.supervisorId)) throw new DomainError('forbidden','Only supervising management may revise assignments',403);
+    if(assignment.directionReview&&c.status==='queued')throw new DomainError('obsolete_assignment','Retain or cancel this obsolete administrative assignment with a reason; create useful replacement work under the current mandate',409);
     if(Object.hasOwn(c,'projectId')||Object.hasOwn(c,'payload'))throw new DomainError('immutable_assignment_scope','assignment.update does not support projectId or payload changes. Supervising management can cancel the old assignment with a reason and create a new correctly scoped assignment; retained history and acceptance are not rebound.');
     const patch: any={};
     if(c.completionRequirements!==undefined||c.completionEvidence!==undefined||c.status==='completed')this.requireLevel(actor,['ceo','executive','lead','manager']);

@@ -12,7 +12,7 @@ beforeEach(()=>{root=mkdtempSync(join(tmpdir(),'opencorp-formation-'));store=new
 afterEach(()=>{store.close();rmSync(root,{recursive:true,force:true});});
 test('expansion queues governance work without manufacturing staff and resumes without duplicate proposals',()=>{
  reconcileFormation(store);expect(store.list('assignments')).toHaveLength(0);
- store.command({kind:'owner'},{type:'company.expand',mandate:'Establish broad company through real local recruitment.'});
+ store.update('company',store.company.id,{direction:undefined});store.command({kind:'owner'},{type:'company.expand',mandate:'Establish broad company through real local recruitment.'});
  reconcileFormation(store);reconcileFormation(store);
  expect(Object.values(departmentalCoverage).flat()).toHaveLength(29);
  expect(store.list('employees')).toHaveLength(4);expect(store.list('departments')).toHaveLength(0);
@@ -21,7 +21,7 @@ test('expansion queues governance work without manufacturing staff and resumes w
 });
 test('partial charter cannot complete formation and a matching worker title cannot replace executive governance',()=>{
  const owner={kind:'owner'} as const,ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
- store.command(owner,{type:'company.expand',mandate:'Recruit actual specialists.'});
+ store.update('company',store.company.id,{direction:undefined});store.command(owner,{type:'company.expand',mandate:'Recruit actual specialists.'});
  store.put('models',{id:'fixture',name:'fixture',local:true,available:true,artifactIdentity:'fixture'});
  const position=store.command(owner,{type:'position.create',title:'Chief Technology Officer',level:'worker',responsibilities:'Fixture title collision'});
  store.command(owner,{type:'employee.hire',positionId:position.id,name:'Fixture worker',modelId:'fixture',homeManagerId:ceo.id});
@@ -36,7 +36,7 @@ test('partial charter cannot complete formation and a matching worker title cann
 
 test('formation schedules completion of existing partial departments',()=>{
  const owner={kind:'owner'} as const,ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
- store.command(owner,{type:'company.expand',mandate:'Complete persistent specialist formation'});
+ store.update('company',store.company.id,{direction:undefined});store.command(owner,{type:'company.expand',mandate:'Complete persistent specialist formation'});
  const position=store.put('positions',{title:'Chief Technology Officer',level:'executive',status:'active'});
  const executive=store.put('employees',{name:'Existing CTO',status:'active',positionId:position.id,homeManagerId:ceo.id});
  const department=store.command(owner,{type:'department.create',name:'Web Engineering',managerId:executive.id,responsibilities:'Web products'});
@@ -47,7 +47,7 @@ test('formation schedules completion of existing partial departments',()=>{
 
 test('rejected executive proposals defer to the existing audited scheduler correction path',()=>{
  const owner={kind:'owner'} as const,ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
- store.command(owner,{type:'company.expand',mandate:'Establish governed executive coverage'});reconcileFormation(store);
+ store.update('company',store.company.id,{direction:undefined});store.command(owner,{type:'company.expand',mandate:'Establish governed executive coverage'});reconcileFormation(store);
  const task=store.list('assignments').find(a=>a.schedulerKey==='formation:office:Chief Technology Officer')!;
  store.update('assignments',task.id,{status:'completed'});
  const position=store.put('positions',{title:'Chief Technology Officer',level:'executive',status:'active'});
@@ -75,7 +75,7 @@ test('a candidate retained before interruption satisfies the same assignment on 
 
 test.each(['pending','approved','rejected'])('recovers an interrupted exact-task office proposal with status %s without replaying it',status=>{
  const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
- store.command({kind:'owner'},{type:'company.expand',mandate:'Resume actual employee formation'});reconcileFormation(store);
+ store.update('company',store.company.id,{direction:undefined});store.command({kind:'owner'},{type:'company.expand',mandate:'Resume actual employee formation'});reconcileFormation(store);
  const task=store.list('assignments').find(a=>a.schedulerKey==='formation:office:Chief Technology Officer')!;
  const run=store.put('runs',{employeeId:ceo.id,assignmentId:task.id,status:'interrupted'});
  const position=store.put('positions',{title:'Chief Technology Officer',level:'executive',status:'active'});
@@ -90,7 +90,7 @@ test.each(['pending','approved','rejected'])('recovers an interrupted exact-task
 
 test('office recovery excludes unrelated authoring tasks, wrong offices, missing provenance and active runs',()=>{
  const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
- store.command({kind:'owner'},{type:'company.expand',mandate:'Keep exact proposal attribution'});reconcileFormation(store);
+ store.update('company',store.company.id,{direction:undefined});store.command({kind:'owner'},{type:'company.expand',mandate:'Keep exact proposal attribution'});reconcileFormation(store);
  const task=store.list('assignments').find(a=>a.schedulerKey==='formation:office:Chief Technology Officer')!;
  const position=store.put('positions',{title:'Chief Technology Officer',level:'executive',status:'active'});
  const unrelated=store.put('assignments',{employeeId:ceo.id,schedulerKey:'appointment-rejected:prior',status:'completed'});
@@ -108,7 +108,7 @@ test('office recovery excludes unrelated authoring tasks, wrong offices, missing
 
 test('recruiter bootstrap requires the same departmental identity used for staffing discovery',()=>{
  const owner={kind:'owner'} as const,ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
- store.command(owner,{type:'company.expand',mandate:'Form actual recruitment'});
+ store.update('company',store.company.id,{direction:undefined});store.command(owner,{type:'company.expand',mandate:'Form actual recruitment'});
  store.put('models',{id:'fixture',name:'fixture',local:true,available:true,artifactIdentity:'fixture'});
  const office=store.put('positions',{title:'Chief People Officer',level:'executive',status:'active'});
  const people=store.put('employees',{name:'People executive',positionId:office.id,homeManagerId:ceo.id,status:'active'});
@@ -133,7 +133,7 @@ test('recruiter bootstrap requires the same departmental identity used for staff
 
 function onboardingFixture(level:'lead'|'worker'='lead',recruiterStatus:'active'|'dismissed'|'missing'='active'){
  const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
- store.command({kind:'owner'},{type:'company.expand',mandate:'Complete real onboarding and reporting'});
+ store.update('company',store.company.id,{direction:undefined});store.command({kind:'owner'},{type:'company.expand',mandate:'Complete real onboarding and reporting'});
  const department=store.put('departments',{name:'Fixture team',managerId:ceo.id,status:'active'});
  const position=store.put('positions',{title:'Team role',level,departmentId:department.id,status:'active'});
  const req=store.put('experiences',{kind:'requisition',positionId:position.id,departmentId:department.id,departmentManagerId:ceo.id,status:'filled'});
@@ -271,7 +271,7 @@ test.each(['run','owner','candidate','correction','untrusted'])('fresh batching 
  });
 
 function departmentExecutive(title='Chief Product Officer'){
- const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;store.command({kind:'owner'},{type:'company.expand',mandate:'Author complete distinct departments'});
+ const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;store.update('company',store.company.id,{direction:undefined});store.command({kind:'owner'},{type:'company.expand',mandate:'Author complete distinct departments'});
  const position=store.put('positions',{title,level:'executive',status:'active'});return store.put('employees',{name:title,positionId:position.id,status:'active',homeManagerId:ceo.id});
 }
 test('department pairs stay within executive remit, require both real outcomes and resume partial work',()=>{
@@ -334,7 +334,7 @@ test('batch checkpoint names only missing exact-assignment receipts and accepts 
 
 test('an actual executive transfer creates one new vacancy obligation without replaying historical office work',()=>{
  const owner={kind:'owner'} as const,ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
- store.command(owner,{type:'company.expand',mandate:'Maintain canonical executive coverage'});reconcileFormation(store);
+ store.update('company',store.company.id,{direction:undefined});store.command(owner,{type:'company.expand',mandate:'Maintain canonical executive coverage'});reconcileFormation(store);
  store.put('models',{id:'fixture',name:'fixture',local:true,available:true,artifactIdentity:'fixture'});
  const cpo=store.command(owner,{type:'position.create',title:'Chief Product Officer',level:'executive',responsibilities:'Product ownership'}),cto=store.command(owner,{type:'position.create',title:'Chief Technology Officer',level:'executive',responsibilities:'Technology ownership'});
  const appoint=(positionId:string,name:string)=>{const proposal=store.command(owner,{type:'decision.create',kind:'executive.appoint',subject:name,rationale:'Initial fixture executive',payload:{positionId,name,modelId:'fixture',role:'Actual fixture executive responsibilities'}});store.command(owner,{type:'decision.override',decisionId:proposal.id,approve:true,rationale:'Explicit initial fixture appointment'});return store.list('employees').find(e=>e.positionId===positionId&&e.status==='active')!;};
