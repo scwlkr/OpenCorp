@@ -90,8 +90,15 @@ export class KnowledgeVault {
     for (const root of roots) mkdirSync(join(this.root,root),{recursive:true,mode:0o700});
     const mandate='company/mandate.md';
     if (!existsSync(join(this.root,mandate))) this.write({path:mandate,title:'Owner portfolio mandate',content:`# Owner portfolio mandate\n\n${this.store.company.mandate}\n\nNarrative knowledge cannot change operational identity, authority, policy or the $0 unapproved allowance.\n`,source:'Owner OpenCorp build contract',authorId:'owner',generated:false});
+    if(this.store.company.direction==='software-factory')this.syncMandate();
     this.syncProfiles();
     this.scan();
+  }
+  syncMandate() {
+    const content=`# Current company mandate\n\n${this.store.company.mandate}\n`;
+    const current=this.store.list('knowledge').find(k=>k.path==='company/mandate.md');
+    if(current&&existsSync(join(this.root,current.path))&&this.read(current.id).content===content)return;
+    this.write({path:'company/mandate.md',title:'Current company mandate',content,source:'Owner-approved company direction; prior text retained in vault history',authorId:'owner',generated:true});
   }
   /** The file is authoritative only at its approved hash. SQLite retains a recovery
    * snapshot, never a separately editable role. An interrupted write or draft edit

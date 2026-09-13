@@ -194,7 +194,7 @@ test('prior inspection and approval cannot authorize a retained restricted sourc
 
 
 test.each(['active','dismissed','reassigned'])('manager-selected assistant continues candidate, review and provision with Officer %s',officerState=>{
- store.command(owner,{type:'company.expand',mandate:'Recruit actual tailored staff'});
+ store.update('company',store.company.id,{direction:undefined});store.command(owner,{type:'company.expand',mandate:'Recruit actual tailored staff'});
  store.update('departments',departmentId,{name:'Recruitment & Workforce Planning',charter:'Source tailored staff'});
  const officer=recruiter;
  const assistantPosition=store.command(owner,{type:'position.create',title:'Talent Acquisition Specialist',level:'worker',departmentId,responsibilities:'Source tailored local candidates'});
