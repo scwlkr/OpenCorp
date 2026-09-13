@@ -4,7 +4,7 @@
 
 The next dispatched turn receives the complete approved skill, shared working guidance, the current assignment and scoped knowledge. Existing pinned source references retain their attribution; retrieve additional source details only when useful. An already dispatched turn retains its supplied instructions. Run inspection shows the supplied text and revision.
 
-SQLite indexes the approved path and hash and retains immutable revision snapshots for recovery. The employee's `role` read field is a projection, not another authoring surface. A changed, missing or unreadable file uses the last approved snapshot. A manual edit is a draft: inspect it before approving its full content through `update_role`. `knowledge.write` cannot replace the role file. A failed update cannot activate unapproved bytes.
+SQLite indexes the approved path and hash and retains immutable revision snapshots for recovery. The employee's `role` read field is a projection, not another authoring surface. A changed, missing or unreadable file uses the last approved snapshot. A manual edit is a draft: responsible management must inspect it before approving its full content through `update_role`. `knowledge.write` cannot replace the role file. A failed update cannot activate unapproved bytes.
 
 To reverse a revision, read the employee's prior `roleVersions` record through `company_detail`, then call `update_role` with that record's content, its ID as source and the reason for reversal. The version number advances; identity, appointments, current work and permissions stay intact. No separate rollback workflow or approval form is needed. Record proposed lessons through `write_knowledge` or send them to the responsible manager.
 
