@@ -68,6 +68,7 @@ export interface RuntimeOptions {
 
 export interface ExecuteRequest {
   freeInferencePool?: boolean;
+  dataClass?: 'public' | 'internal' | 'confidential';
   runId: string;
   employeeId: string;
   workspace: string;

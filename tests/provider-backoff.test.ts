@@ -63,3 +63,26 @@ it('retains only bounded numeric rate-limit headers without interpreting reset o
  expect(nextProviderBackoff(id,undefined,observed,now)).not.toHaveProperty('rateLimitHeaders');
  expect(nextProviderBackoff(id,undefined,undefined,now,{'x-ratelimit-reset':'1'}).retryAt).toBe(nextProviderBackoff(id,undefined,undefined,now).retryAt);
 });
+
+it('claims a permitted fallback without changing identity and refuses unselected or confidential hosted routes',()=>{
+ const root=mkdtempSync(join(tmpdir(),'opencorp-routing-')),store=new CompanyStore(root);
+ try{
+  store.bootstrap();store.command({kind:'owner'},{type:'control',action:'start'});
+  const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!,local=ceo.modelId;
+  store.put('models',{name:local,local:true,available:true,artifactIdentity:'fixture-local'});
+  store.put('models',{id:'alternate',name:'alternate',local:true,available:true,artifactIdentity:'fixture-alternate'});
+  store.command({kind:'owner'},{type:'employee.model',employeeId:ceo.id,modelId:local,fallbackModelIds:['alternate'],rationale:'Suitable alternate for this work'});
+  const task=store.command({kind:'owner'},{type:'assignment.create',employeeId:ceo.id,title:'Fixture',instructions:'Fixture',acceptance:['Fixture'],kind:'management'});
+  expect(store.need('employees',ceo.id).fallbackModelIds).toEqual(['alternate']);
+  const run=store.claimNext({assignmentId:task.id,modelId:'alternate'});
+  expect(run?.modelId).toBe('alternate');expect(run?.employeeId).toBe(ceo.id);expect(store.need('employees',ceo.id).modelId).toBe(local);
+  store.finishRun(run!.id,{status:'interrupted'});
+  expect(()=>store.claimNext({assignmentId:task.id,modelId:'unselected'})).toThrow();
+  store.update('policy',store.policy.id,{freeInferencePool:true});
+  store.put('models',{id:'free-pool',name:'free-pool',provider:'pool',local:false,freeOnly:true,available:true,artifactIdentity:'a'.repeat(64),endpoint:'opencorp:free-pool'});
+  store.command({kind:'owner'},{type:'employee.model',employeeId:ceo.id,modelId:local,fallbackModelIds:['free-pool'],rationale:'Ordinary internal work only'});
+  const confidential=store.command({kind:'owner'},{type:'assignment.create',employeeId:ceo.id,title:'Private fixture',instructions:'Synthetic private work',acceptance:['Fixture'],kind:'management',dataClass:'confidential'});
+  expect(()=>store.claimNext({assignmentId:confidential.id,modelId:'free-pool'})).toThrow();
+  expect(store.claimNext({assignmentId:confidential.id})?.modelId).toBe(local);
+ }finally{store.close();rmSync(root,{recursive:true,force:true});}
+});

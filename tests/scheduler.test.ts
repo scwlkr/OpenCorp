@@ -852,7 +852,7 @@ it('dispatches the canonical provision-only packet without unrelated company con
  const request=execute.mock.calls[0][0];expect(request.system.endsWith(expected.system)).toBe(true);expect(request.system).toContain(store.need('employees',run.employeeId).role);expect(request.prompt).toBe(expected.prompt);expect(request.corporateOnly).toBe(true);expect(request.provisionOnly).toBe(true);expect(request.prompt).not.toContain('UNRELATED_COMPANY_INLINE_NOTE');expect(request.system).not.toContain('Product implementations require');expect(request.prompt).toContain(candidate.id);expect(request.prompt).toContain(req.id);
 });
 
-import {ProviderCooldownError} from '../src/runtime/resource-budget.js';
+import {ProviderCooldownError,ResourceAdmissionError} from '../src/runtime/resource-budget.js';
 it('holds queued provider work before claiming while dispatching eligible local work',async()=>{
  store.update('runs',run.id,{status:'succeeded'});store.update('assignments',assignment.id,{status:'completed'});const employee=store.need('employees',run.employeeId);store.update('employees',employee.id,{modelId:'gemini:fixture'});
  const target=store.command(owner,{type:'assignment.create',employeeId:employee.id,title:'Wait for provider',instructions:'Actual pending work',acceptance:['Retain work'],kind:'management'}),retryAt=new Date(Date.now()+60000).toISOString();
@@ -966,4 +966,39 @@ it('keeps an interrupted assignment quarantined when native process cleanup is u
  store.recoverRuns(()=> 'absent');
  store.command(owner,{type:'assignment.update',assignmentId:assignment.id,paused:false,rationale:'Native ownership positively reconciled'});
  const next=store.claimNext({assignmentId:assignment.id});expect(next?.employeeId).toBe(run.employeeId);expect(next?.workspace).toBe(run.workspace);expect(store.need('assignments',assignment.id).resumeRunId).toBe(run.id);
+});
+
+it('continues the same assignment on a selected local alternate while its provider is cooling down',async()=>{
+ store.update('runs',run.id,{status:'succeeded'});store.update('assignments',assignment.id,{status:'completed'});
+ const employee=store.need('employees',run.employeeId),preferred='free-pool';
+ store.update('policy',store.policy.id,{freeInferencePool:true});
+ store.put('models',{id:preferred,name:preferred,provider:'pool',local:false,freeOnly:true,available:true,artifactIdentity:'a'.repeat(64),endpoint:'opencorp:free-pool'});
+ store.command(owner,{type:'employee.model',employeeId:employee.id,modelId:preferred,fallbackModelIds:[model],rationale:'Same bounded work fits local engine'});
+ const target=store.command(owner,{type:'assignment.create',employeeId:employee.id,title:'Continue retained work',instructions:'Read preserved progress',acceptance:['Retain work'],kind:'management'}),retryAt=new Date(Date.now()+60000).toISOString();
+ const runtime={providerAvailability:async(id:string)=>id===preferred?new ProviderCooldownError(preferred,retryAt):undefined,status:()=>({inferenceSlots:1})} as unknown as LocalRuntime;
+ const scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');Object.assign(scheduler,{recoveryComplete:true,initialized:true});
+ vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);
+ const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined);
+ await scheduler.tick();expect(execute).toHaveBeenCalledOnce();
+ expect(execute.mock.calls[0][0]).toMatchObject({employeeId:employee.id,assignmentId:target.id,modelId:model});
+ expect(store.need('employees',employee.id).modelId).toBe(preferred);
+ const claimed=execute.mock.calls[0][0] as EmployeeRun;store.finishRun(claimed.id,{status:'interrupted'});
+ store.update('models',store.list('models').find(m=>m.name===model)!.id,{available:false});
+ await scheduler.tick();expect(execute).toHaveBeenCalledOnce();expect(store.need('assignments',target.id)).toMatchObject({status:'queued',attempts:1,resumeRunId:claimed.id});
+ await scheduler.tick();expect(execute).toHaveBeenCalledOnce();
+});
+
+it('retains both local admission waits instead of alternating failed claims',async()=>{
+ store.update('runs',run.id,{status:'succeeded'});store.update('assignments',assignment.id,{status:'completed'});
+ store.put('models',{id:'alternate',name:'alternate',local:true,available:true,artifactIdentity:'alternate',capabilities:['tools']});
+ store.command(owner,{type:'employee.model',employeeId:run.employeeId,modelId:model,fallbackModelIds:['alternate'],rationale:'Suitable bounded work'});
+ const target=store.command(owner,{type:'assignment.create',employeeId:run.employeeId,title:'Capacity hold',instructions:'Retain work',acceptance:['Retain work'],kind:'management'});
+ const runtime={status:()=>({inferenceSlots:1}),providerAvailability:vi.fn(),execute:vi.fn(async()=>{throw new ResourceAdmissionError('Local memory pressure');})} as unknown as LocalRuntime;
+ const scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');Object.assign(scheduler,{recoveryComplete:true,initialized:true});
+ vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);vi.spyOn(scheduler as any,'idle').mockImplementation(()=>{});
+ const first=store.claimNext({assignmentId:target.id,workspace:root})!;await (scheduler as any).execute(first);
+ const second=store.claimNext({assignmentId:target.id,workspace:root,modelId:'alternate'})!;await (scheduler as any).execute(second);
+ expect(runtime.execute).toHaveBeenCalledTimes(2);
+ await scheduler.tick();await scheduler.tick();
+ const retained=store.need('assignments',target.id);expect(retained.status).toBe('queued');expect(Date.parse(retained.availableAt)).toBeGreaterThan(Date.now());expect(runtime.execute).toHaveBeenCalledTimes(2);expect(runtime.providerAvailability).not.toHaveBeenCalled();
 });
