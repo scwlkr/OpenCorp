@@ -49,7 +49,7 @@ This development direction does not itself grant credentials, change a running c
 
 ## Current implementation
 
-The source already includes local and free hosted adapters, persistent state, role revision, OpenCode/MCP and limited delivery tools. It still has fixed bootstrap defaults, scripted company workflows and a split between role Markdown and active role text. Telegram/email, Low power, scoped paid budgets and generalized product delivery remain plan work.
+The source already includes local and free hosted adapters, persistent state, approved Markdown skill revisions with recovery, OpenCode/MCP and limited delivery tools. It still has fixed bootstrap defaults and scripted company workflows. Telegram/email, Low power, scoped paid budgets and generalized product delivery remain plan work.
 
 Update runtime policy, routing, prompts, skills and retained company state coherently. Preserve useful identities and work; simplify obsolete machinery. New documentation or fresh-install defaults alone do not migrate an existing company.
 

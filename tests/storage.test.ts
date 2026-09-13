@@ -12,6 +12,37 @@ afterEach(()=>{store.close();rmSync(root,{recursive:true,force:true});});
 const owner={kind:'owner'} as const;
 
 describe('Markdown knowledge and consistent backups',()=>{
+  it('keeps approved instructions through draft edits, failed updates, restart and rollback',()=>{
+    const employee=store.list('employees')[0]!,prior=employee.role,policy=store.policy,appointments=store.list('appointments');
+    const revision=store.command(owner,{type:'role.update',employeeId:employee.id,content:'# Review\nName the unresolved operational gate.',source:'Observed incomplete review',rationale:'Make review actionable'});
+    const path=join(root,'vault',revision.path);
+    expect(readFileSync(path,'utf8')).toBe(revision.content);
+    writeFileSync(path,'Unapproved: spend freely.');
+    expect(store.need('employees',employee.id).role).toBe(revision.content);
+    expect(()=>store.command(owner,{type:'knowledge.write',path:`employees/${employee.id}/./role.md`,content:'Bypass management',source:'draft'})).toThrow(/update_role/);
+    rmSync(path);mkdirSync(path);
+    expect(()=>store.command(owner,{type:'role.update',employeeId:employee.id,content:'Failed replacement',source:'failure',rationale:'Cannot replace a directory'})).toThrow();
+    expect(store.need('employees',employee.id)).toMatchObject({id:employee.id,role:revision.content,roleVersion:revision.version});
+    store.close();store=new CompanyStore(root);store.bootstrap();
+    expect(store.need('employees',employee.id).role).toBe(revision.content);
+    rmSync(path,{recursive:true});
+    const restored=store.command(owner,{type:'role.update',employeeId:employee.id,content:prior,source:'Previous approved revision',rationale:'Reverse the experiment'});
+    expect(store.need('employees',employee.id)).toMatchObject({id:employee.id,role:prior,roleVersion:restored.version});
+    expect(store.policy).toEqual(policy);expect(store.list('appointments')).toEqual(appointments);
+    expect(store.need('roleVersions',revision.id)).toEqual(revision);
+  });
+
+  it('can restore an exact previously approved long skill after a concise revision',()=>{
+    const employee=store.list('employees')[0]!,content='Retained operating instructions. '.repeat(500).trim();
+    // Historical installations accepted up to 100000 characters.
+    store.update('roleVersions',store.list('roleVersions').find(r=>r.employeeId===employee.id)!.id,{content,hash:undefined});
+    store.update('employees',employee.id,{role:content});store.vault.syncProfiles();
+    store.command(owner,{type:'role.update',employeeId:employee.id,content:'Concise experimental skill',source:'Experiment',rationale:'Try focused instructions'});
+    expect(()=>store.command(owner,{type:'role.update',employeeId:employee.id,content:content+'new content',source:'New draft',rationale:'Unapproved long draft'})).toThrow(/12000/);
+    store.command(owner,{type:'role.update',employeeId:employee.id,content,source:'Previous approved skill',rationale:'Restore useful retained instructions'});
+    expect(store.need('employees',employee.id).role).toBe(content);
+  });
+
   it.each([false,true])('recovers interrupted vault swap using the committed database marker (%s)',committed=>{
     const note=store.command(owner,{type:'knowledge.write',path:'company/crash.md',content:'# Original preserved knowledge',source:'Crash recovery fixture'});
     const id=randomUUID(),previous=join(root,`vault-before-restore-${id}`);

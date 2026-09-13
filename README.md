@@ -12,7 +12,7 @@ A persistent software factory company that creates and maintains products people
 
 ## Implementation status
 
-The source includes persistent company state, OpenCode/MCP execution, local and free-provider adapters, role revisions, repository tools and limited delivery/adoption paths. The full charter is not implemented. Telegram/email, Low power, scoped paid-inference budgets, Markdown-authoritative skills and general product delivery require work. Existing company state still needs migration from earlier mandates.
+The source includes persistent company state, OpenCode/MCP execution, local and free-provider adapters, [approved Markdown skill revisions](docs/EMPLOYEE_SKILLS.md), repository tools and limited delivery/adoption paths. The full charter is not implemented. Telegram/email, Low power, scoped paid-inference budgets, and general product delivery require work. Existing company state still needs migration from earlier mandates.
 
 Fresh bootstrap still targets `~/Desktop/dev/WalkLang`, `~/Desktop/dev/paletteWOW`, and `~/Desktop/dev/openjob`. Its founding mandate authorizes autonomous reviewed merges, qualified releases and product communications. Review the bootstrap configuration and connected identities before starting a new company; existing databases retain their recorded configuration.
 

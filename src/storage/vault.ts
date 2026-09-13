@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { CompanyStore } from './store.js';
-import { DomainError, type Knowledge, type TableName } from '../core/types.js';
+import { DomainError, type Employee, type Knowledge, type TableName } from '../core/types.js';
 import { TABLES } from './schema.js';
 
 const digest = (content: string | Buffer) => createHash('sha256').update(content).digest('hex');
@@ -93,11 +93,34 @@ export class KnowledgeVault {
     this.syncProfiles();
     this.scan();
   }
-  write(input: Record<string,any>): Knowledge {
+  /** The file is authoritative only at its approved hash. SQLite retains a recovery
+   * snapshot, never a separately editable role. An interrupted write or draft edit
+   * cannot activate instructions without the management command committing. */
+  approvedRole(employee:Employee):string {
+    const revision=this.store.list('roleVersions').find(r=>r.employeeId===employee.id&&r.version===employee.roleVersion);
+    if(!revision?.hash)return employee.role ?? revision?.content ?? '';
+    try {
+      const path=this.safe(revision.path);
+      if(lstatSync(path).size>200000)return revision.content;
+      const content=readFileSync(path,'utf8');
+      if(digest(content)===revision.hash)return content;
+    } catch { /* Use the last approved snapshot if its Markdown is unavailable. */ }
+    return revision.content;
+  }
+  approveRole(employee:Employee,content:string,metadata:Record<string,any>) {
+    if(content.length>12000&&!this.store.list('roleVersions').some(r=>r.employeeId===employee.id&&r.content.trim()===content))throw new DomainError('invalid_role','Keep approved skills concise: at most 12000 characters');
+    const path=`employees/${employee.id}/role.md`;
+    const note=this.write({...metadata,path,scope:'employees',scopeId:employee.id,title:`${employee.name} — approved skill`,content},true);
+    const revision=this.store.put('roleVersions',{...metadata,employeeId:employee.id,version:employee.roleVersion+1,content,path,hash:note.hash});
+    this.store.update('employees',employee.id,{roleVersion:revision.version});
+    return revision;
+  }
+  write(input: Record<string,any>, approvedRole=false): Knowledge {
     const scope=input.scope ?? (input.path?String(input.path).split('/')[0]:'company');
     if (!roots.has(scope)) throw new DomainError('invalid_scope','Unknown knowledge scope');
     const scopeId=input.scopeId ?? null;
     const path=input.path ?? `${scope}/${scopeId?`${scopeId}/`:''}${randomUUID()}.md`;
+    if (/^employees\/[^/]+\/role\.md$/.test(relative(this.root,resolve(this.root,path)).split(sep).join('/'))&&!approvedRole) throw new DomainError('role_approval_required','Use update_role through responsible management to approve employee Markdown',403);
     if (path.endsWith('.generated.md')&&!input.generated) throw new DomainError('generated_profile','Generated operational mirrors can only be written from SQLite',403);
     const target=this.safe(path,true);
     if (typeof input.content!=='string'||!input.content.trim()||Buffer.byteLength(input.content)>200_000) throw new DomainError('invalid_knowledge','Knowledge needs nonempty Markdown up to 200 KB');
@@ -160,7 +183,16 @@ export class KnowledgeVault {
     for (const employee of this.store.list('employees')) {
       const position=this.store.need('positions',employee.positionId);
       mirror(`employees/${employee.id}/profile.generated.md`,employee.name,`- ID: ${employee.id}\n- Badge: ${employee.badge}\n- Position: ${position.title}\n- Employment: ${employee.status}\n- Home manager: ${employee.homeManagerId ?? 'None'}\n- Department: ${employee.departmentId ?? 'None'}\n- Local model: ${employee.modelId}\n- Role version: ${employee.roleVersion}`,employee.id);
-      for (const topic of ['role','experience','performance','relationships']) { const path=`employees/${employee.id}/${topic}.md`; if (!existsSync(join(this.root,path))) this.write({path,title:`${employee.name} — ${topic}`,scope:'employees',scopeId:employee.id,content:`# ${employee.name} — ${topic}\n\n${topic==='role'?employee.role:'Record source-linked observations here. Narrative does not grant authority.'}\n`,source:'Founding or appointment role',authorId:'system'}); }
+      const revision=this.store.list('roleVersions').find(r=>r.employeeId===employee.id&&r.version===employee.roleVersion);
+      if(revision&&!revision.hash){
+        // Retained active instructions win over the old seeded role copy. write()
+        // preserves the old Markdown in existing history before migration.
+        const path=`employees/${employee.id}/role.md`,content=employee.role;
+        const note=this.write({path,title:`${employee.name} — approved skill`,scope:'employees',scopeId:employee.id,content,source:revision.source,authorId:revision.authorId},true);
+        this.store.update('roleVersions',revision.id,{content,path,hash:note.hash});
+        this.store.update('employees',employee.id,{});
+      }
+      for (const topic of ['experience','performance','relationships']) { const path=`employees/${employee.id}/${topic}.md`; if (!existsSync(join(this.root,path))) this.write({path,title:`${employee.name} — ${topic}`,scope:'employees',scopeId:employee.id,content:`# ${employee.name} — ${topic}\n\nRecord source-linked observations here. Narrative does not grant authority.\n`,source:'Founding or appointment role',authorId:'system'}); }
     }
     for (const product of this.store.list('products')) mirror(`products/${product.id}/profile.generated.md`,product.name,`Repository: ${product.repository}\n\nAssessment: ${product.assessment || 'Awaiting leadership assessment'}\n\nGoals: ${JSON.stringify(product.goals)}\n\nRationale: ${product.rationale}`,product.id);
     for (const department of this.store.list('departments')) mirror(`departments/${department.id}/profile.generated.md`,department.name,`Manager: ${department.managerId}\n\n${department.responsibilities}`,department.id);
