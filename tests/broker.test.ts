@@ -391,7 +391,7 @@ describe('bounded corporate mutation receipts',()=>{
   const generic=wire(brokerTools.find(tool=>tool.name==='company_command')!.inputSchema).properties.command;
   expect(generic.properties).toBeUndefined();
   const model=generic.anyOf.find((branch:any)=>branch.properties.type.enum[0]==='employee.model'),decision=generic.anyOf.find((branch:any)=>branch.properties.type.enum[0]==='decision.create');
-  expect(Object.keys(model.properties)).toEqual(['type','employeeId','modelId','rationale']);expect(model.required).toEqual(['type','employeeId','modelId','rationale']);
+  expect(Object.keys(model.properties)).toEqual(['type','employeeId','modelId','rationale','fallbackModelIds']);expect(model.required).toEqual(['type','employeeId','modelId','rationale']);
   expect(Object.keys(decision.properties)).toEqual(['type','kind','subject','rationale','payload']);expect(decision.required).toEqual(['type','kind','subject','rationale']);
   expect(decision.properties.payload.properties).toMatchObject({positionId:{type:'string'},employeeId:{type:'string'},name:{type:'string'},modelId:{type:'string'}});
   for(const assignmentField of ['artifactId','decisionId','sourceAssignmentId'])expect(decision.properties.payload.properties).not.toHaveProperty(assignmentField);
@@ -1466,4 +1466,16 @@ it('advertises Ruby resolution only for current paletteWOW implementation and re
  const product=store.list('products').find(p=>p.name==='paletteWOW')!,project=store.command(owner,{type:'project.create',name:'Scoped Ruby repair',productId:product.id,outcome:'Repair actual dependency',acceptance:['Verified update'],supervisorId:ceo.id,rationale:'Test resolver scope'}),actor=actorFor(ceo,project),assignmentId=store.need('runs',actor.runId).assignmentId;
  expect(broker.toolsFor(actor).map(t=>t.name)).toContain('resolve_ruby_dependencies');
  for(const update of [{kind:'review'},{kind:'implementation',payload:{pullRequest:{number:1,headSha:'a'.repeat(40)}}}]){store.update('assignments',assignmentId,update);expect(broker.toolsFor(actor).map(t=>t.name)).not.toContain('resolve_ruby_dependencies');await expect(broker.call(actor,'resolve_ruby_dependencies',{gems:['rack'],rationale:'Scope test'})).rejects.toMatchObject({code:'dependency_resolution_scope'});}
+});
+
+it('withholds confidential assignments and derived runs from hosted summaries and detail reads',async()=>{
+ const confidential=store.command(owner,{type:'assignment.create',employeeId:ceo.id,title:'SYNTHETIC_PRIVATE_TITLE',instructions:'SYNTHETIC_PRIVATE_INSTRUCTIONS',acceptance:['Private fixture'],kind:'management',dataClass:'confidential'});
+ const failed=store.put('runs',{assignmentId:confidential.id,employeeId:ceo.id,modelId:model,status:'failed',text:'SYNTHETIC_PRIVATE_RESULT'});
+ const diagnosis=store.put('assignments',{...confidential,id:randomUUID(),dataClass:undefined,title:'SYNTHETIC_PRIVATE_DIAGNOSIS',schedulerKey:`fault:${failed.id}`,payload:{failedAssignmentId:confidential.id},status:'queued'});
+ const actor=actorFor(ceo);store.update('runs',actor.runId,{modelId:'free-pool'});
+ expect(JSON.stringify(broker.companyRead(actor))).not.toContain('SYNTHETIC_PRIVATE');
+ for(const [collection,id] of [['assignments',confidential.id],['assignments',diagnosis.id],['runs',failed.id]])await expect(broker.call(actor,'company_detail',{collection,id})).rejects.toMatchObject({code:'evidence_forbidden'});
+ expect(store.confidentialAssignments().has(diagnosis.id)).toBe(true);
+ store.update('runs',actor.runId,{modelId:model});
+ expect(JSON.stringify(await broker.call(actor,'company_detail',{collection:'assignments',id:confidential.id}))).toContain('SYNTHETIC_PRIVATE_INSTRUCTIONS');
 });

@@ -115,6 +115,21 @@ export class CompanyStore {
     if(assignment.schedulerKey?.startsWith('dependency-wait:'))return assignment.payload?.blockedAssignmentId;
     if(assignment.schedulerKey?.startsWith('responsibility:'))return assignment.payload?.sourceAssignmentId;
   }
+  /** Follow retained provenance; a new recovery/review is not a data release. */
+  confidentialAssignments():Set<string> {
+    const assignments=this.list('assignments'),hidden=new Set(assignments.filter(a=>a.dataClass==='confidential').map(a=>a.id));
+    let changed=true;
+    while(changed){const before=hidden.size;
+      const projects=new Set(assignments.filter(a=>hidden.has(a.id)&&a.projectId).map(a=>a.projectId));
+      for(const a of assignments){
+        const artifact=this.get('artifacts',a.payload?.artifactId??a.schedulerKey?.split(':')[1]??'');
+        const origin=this.assignmentOrigin(a)??a.payload?.sourceAssignmentId??a.payload?.invalidReviewAssignmentId??artifact?.assignmentId;
+        if(origin&&hidden.has(origin)||a.projectId&&projects.has(a.projectId)||(a.dependencies??[]).some(id=>hidden.has(id)))hidden.add(a.id);
+      }
+      changed=before!==hidden.size;
+    }
+    return hidden;
+  }
   snapshot(actor?: Actor): CompanySnapshot {
     const output: any = {};
     for (const table of TABLES) output[table] = ['company','policy'].includes(table) ? this.list(table)[0] : this.list(table);
@@ -395,7 +410,10 @@ export class CompanyStore {
         const selfDiagnosis=actor.kind==='employee'&&c.employeeId===actor.employeeId&&['ceo','elder'].includes(this.level(actor.employeeId))&&fault?.assignment.status==='blocked'&&fault.failedRun.employeeId===actor.employeeId&&fault.assignment.employeeId===actor.employeeId;
         if(!selfDiagnosis)this.manager(actor,c.employeeId); this.localModel(required(c.modelId,'Local model'));
         if (this.need('employees',c.employeeId).status!=='active') throw new DomainError('inactive_employee','Dismissed employees cannot be reassigned');
-        return this.update('employees',c.employeeId,{modelId:c.modelId,modelRationale:required(c.rationale,'Rationale'),modelChange:{priorModelId:this.need('employees',c.employeeId).modelId,modelId:c.modelId,runId:actor.kind==='employee'?actor.runId:null,at:NOW()}});
+        const fallbacks=c.fallbackModelIds??[];
+        if(!Array.isArray(fallbacks)||fallbacks.some(id=>typeof id!=='string'||id===c.modelId)||new Set(fallbacks).size!==fallbacks.length)throw new DomainError('invalid_models','Fallbacks must be distinct suitable model IDs');
+        for(const id of fallbacks)this.localModel(id);
+        return this.update('employees',c.employeeId,{modelId:c.modelId,fallbackModelIds:fallbacks,modelRationale:required(c.rationale,'Rationale'),modelChange:{priorModelId:this.need('employees',c.employeeId).modelId,modelId:c.modelId,runId:actor.kind==='employee'?actor.runId:null,at:NOW()}});
       }
       case 'employee.dismiss': {
         this.manager(actor,c.employeeId);
@@ -469,13 +487,16 @@ export class CompanyStore {
           if(!c.projectId||!this.need('projects',c.projectId).productId||(c.kind??'implementation')!=='implementation'||!pr||!Number.isSafeInteger(pr.number)||pr.number<1||typeof pr.headSha!=='string'||!/^[a-f0-9]{40,64}$/.test(pr.headSha))throw new DomainError('invalid_pull_request_assignment','An existing PR requires a finite product implementation assignment with payload.pullRequest {number,headSha} observed through repo_pr');
           if(actor.kind!=='owner'&&!['ceo','executive','lead','manager'].includes(this.level(actor.employeeId)))throw new DomainError('manager_required','Supervising management must explicitly select an existing product PR',403);
         }
+        if(c.dataClass!==undefined&&!['public','internal','confidential'].includes(c.dataClass))throw new DomainError('invalid_data_class','Use public, internal or confidential');
+        const parent=actor.kind==='employee'?this.need('assignments',this.need('runs',actor.runId).assignmentId):undefined;
+        const dataClass=parent&&this.confidentialAssignments().has(parent.id)?'confidential':c.dataClass??'internal';
         const accepted=actor.kind==='owner' || employee.id===authorId || this.canManage(actor,employee.id);
         if(c.completionRequirements!==undefined&&(c.kind??'implementation')!=='implementation')throw new DomainError('invalid_completion_requirements','Structured completion requirements apply to implementation assignments');
         const acceptance=this.acceptance(c.acceptance);
         if(c.completionSource!==undefined){if(!['artifact','delivery'].includes(c.completionSource)||c.completionRequirements!==undefined||(c.kind??'implementation')!=='implementation')throw new DomainError('invalid_completion_requirements','Choose one explicit artifact or delivery source, or full requirements');c.completionRequirements=acceptance.map(criterion=>({criterion,source:c.completionSource}));}
         const completionRequirements=c.completionRequirements===undefined?undefined:this.assignmentRequirements(acceptance,c.completionRequirements);
         if(completionRequirements&&actor.kind==='employee'){this.requireLevel(actor,['ceo','executive','lead','manager']);if(this.need('assignments',this.need('runs',actor.runId).assignmentId).kind==='review')throw new DomainError('requirements_manager_required','Review assignments cannot declare completion requirements',403);}
-        return this.put('assignments',{projectId:c.projectId ?? null,employeeId:employee.id,supervisorId,title:required(c.title,'Title'),instructions:required(c.instructions,'Instructions'),acceptance,dependencies,status:'queued',priority:finite(c.priority,0),attempts:0,corrections:0,kind:c.kind ?? 'implementation',availableAt:NOW(),accepted,payload:c.payload ?? {},...(completionRequirements?{completionRequirements,requirementsDeclaration:{actorId:authorId,runId:actor.kind==='employee'?actor.runId:null,at:NOW(),rationale:required(c.rationale,'Completion requirement rationale')}}:{})});
+        return this.put('assignments',{projectId:c.projectId ?? null,employeeId:employee.id,supervisorId,title:required(c.title,'Title'),instructions:required(c.instructions,'Instructions'),acceptance,dependencies,status:'queued',priority:finite(c.priority,0),attempts:0,corrections:0,kind:c.kind ?? 'implementation',availableAt:NOW(),accepted,dataClass,payload:c.payload ?? {},...(completionRequirements?{completionRequirements,requirementsDeclaration:{actorId:authorId,runId:actor.kind==='employee'?actor.runId:null,at:NOW(),rationale:required(c.rationale,'Completion requirement rationale')}}:{})});
       }
       case 'assignment.accept': {
         const assignment=this.need('assignments',c.assignmentId),employee=this.need('employees',assignment.employeeId);
@@ -938,17 +959,20 @@ export class CompanyStore {
   }
   modelDispatchAllowed(modelId:string):boolean { const cooldown=this.providerBackoff();return !validOpenRouterFreeId(modelId)||!cooldown||Date.parse(cooldown.retryAt)<=Date.now(); }
   pendingAssignmentEffects(assignmentId:string) { const runs=new Set(this.list('runs').filter(run=>run.assignmentId===assignmentId).map(run=>run.id));return this.list('actions').filter(action=>runs.has(action.runId)&&['dispatched','uncertain'].includes(action.status)); }
-  claimNext(options: {workspace?: string; leaseMs?: number; assignmentId?: string} = {}): EmployeeRun | undefined {
+  claimNext(options: {workspace?: string; leaseMs?: number; assignmentId?: string; modelId?: string} = {}): EmployeeRun | undefined {
     return this.db.transaction(() => {
       if (this.company.state!=='running') return undefined;
       this.reconcileReviewScopes();
       if (this.list('runs').filter(r=>r.status==='running'||r.status==='cancelling').length>=this.policy.maxInference) return undefined;
       const assignments=this.list('assignments');
-      const ready=assignments.filter(a=>a.status==='queued'&&!a.paused&&!this.list('runs').some(run=>run.assignmentId===a.id&&run.status==='uncertain')&&!this.pendingAssignmentEffects(a.id).length&&a.accepted!==false&&a.availableAt<=NOW()&&(!options.assignmentId||a.id===options.assignmentId)&&this.modelDispatchAllowed(a.kind==='social'&&a.payload?.modelId?a.payload.modelId:this.need('employees',a.employeeId).modelId)&&!this.reviewScopeIssue(a)&&this.reviewScopeCorrectionAllowed(a)&&(!a.projectId||this.need('projects',a.projectId).status==='active'&&projectDispatchAllowed(this.need('projects',a.projectId),a))&&(a.kind!=='social'||socialDispatchAllowed(this,a.id))&&this.need('employees',a.employeeId).status==='active'&&a.dependencies.every(id=>{const dependency=this.get('assignments',id);return !!dependency&&this.assignmentCompleted(dependency);}));
+      const ready=assignments.filter(a=>a.status==='queued'&&!a.paused&&!this.list('runs').some(run=>run.assignmentId===a.id&&run.status==='uncertain')&&!this.pendingAssignmentEffects(a.id).length&&a.accepted!==false&&a.availableAt<=NOW()&&(!options.assignmentId||a.id===options.assignmentId)&&this.modelDispatchAllowed(options.modelId??(a.kind==='social'&&a.payload?.modelId?a.payload.modelId:this.need('employees',a.employeeId).modelId))&&!this.reviewScopeIssue(a)&&this.reviewScopeCorrectionAllowed(a)&&(!a.projectId||this.need('projects',a.projectId).status==='active'&&projectDispatchAllowed(this.need('projects',a.projectId),a))&&(a.kind!=='social'||socialDispatchAllowed(this,a.id))&&this.need('employees',a.employeeId).status==='active'&&a.dependencies.every(id=>{const dependency=this.get('assignments',id);return !!dependency&&this.assignmentCompleted(dependency);}));
       ready.sort((a,b)=>(b.priority+Math.floor((Date.now()-Date.parse(b.createdAt))/3_600_000))-(a.priority+Math.floor((Date.now()-Date.parse(a.createdAt))/3_600_000))||a.createdAt.localeCompare(b.createdAt));
       const assignment=ready[0]; if (!assignment) return undefined;
       const employee=this.need('employees',assignment.employeeId);
-      const modelId=assignment.kind==='social'&&assignment.payload?.modelId?assignment.payload.modelId:employee.modelId;
+      const preferred=assignment.kind==='social'&&assignment.payload?.modelId?assignment.payload.modelId:employee.modelId;
+      const modelId=options.modelId??preferred;
+      if(modelId!==preferred&&(assignment.kind==='social'||!employee.fallbackModelIds?.includes(modelId)))throw new DomainError('unselected_model','Management must select a suitable fallback first',403);
+      if(this.confidentialAssignments().has(assignment.id)&&!this.list('models').some(m=>(m.id===modelId||m.name===modelId)&&m.local===true))throw new DomainError('private_route_denied','Confidential assignments require local inference',403);
       this.localModel(modelId);
       if(assignment.kind==='social'&&this.list('models').some(m=>m.id===modelId&&m.local===false))throw new DomainError('hosted_inference_denied','Workplace social turns require local models',403);
       if (this.list('runs').some(r=>!TERMINAL.has(r.status)&&(r.employeeId===employee.id||assignment.projectId&&this.need('assignments',r.assignmentId).projectId===assignment.projectId))) return undefined;

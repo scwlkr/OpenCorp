@@ -211,7 +211,7 @@ export class RunGateway {
       const signatures=this.model.provider==='gemini'||this.model.provider==='pool'?this.geminiSignatures.begin():undefined;
       const onDispatch = (body: Record<string, unknown>) => this.onContext?.({ request: this.usage.requests, boundary: 'provider transport body; headers excluded', body });
       if (this.model.local) onDispatch(body);
-      const pooled = this.ollama instanceof FreeInferencePool ? await this.ollama.generate({ messages: body.messages as any[], tools: body.tools as any[], tool_choice: body.tool_choice, max_tokens: Number(body.max_tokens), quality: employeeStep ? 2 : 1, dataClass: 'internal', purpose: 'work', onDispatch },controller.signal) : undefined;
+      const pooled = this.ollama instanceof FreeInferencePool ? await this.ollama.generate({ messages: body.messages as any[], tools: body.tools as any[], tool_choice: body.tool_choice, max_tokens: Number(body.max_tokens), quality: employeeStep ? 2 : 1, dataClass: this.run.dataClass==='confidential'?'confidential':'internal', purpose: 'work', onDispatch },controller.signal) : undefined;
       if(pooled)this.emit({type:'runtime.inference.routed',runId:this.run.runId,payload:{request:this.usage.requests,modelId:pooled.model}});
       const upstream = pooled ? Object.assign(Readable.from([Buffer.from(body.stream ? completionSSE(pooled,this.model.alias) : JSON.stringify(pooled))]),{statusCode:200,headers:{'content-type':body.stream?'text/event-stream':'application/json'} as Record<string,string>})
         : this.ollama instanceof DirectFree && (this.model.provider==='groq'||this.model.provider==='gemini'||this.model.provider==='zai')

@@ -414,6 +414,9 @@ Record the next accountable action with company_command {command:{type:"responsi
   const blindPeers=new Set(state.decisions.filter(d=>blind.has(d.id)).flatMap(d=>(d.eligibleElders??[]).filter(id=>id!==employee.id)));
   const decisions=new Set(state.decisions.map(d=>d.id));
   const hiddenAssignments=new Set(state.assignments.filter(a=>a.kind==='governance'&&(a.employeeId!==employee.id&&blind.has(a.payload?.decisionId)||!decisions.has(a.payload?.decisionId))||a.schedulerKey?.startsWith('governance-application:')&&(blind.has(a.payload?.sourceDecisionId)||!decisions.has(a.payload?.sourceDecisionId))).map(a=>a.id));
+  const hosted=!state.models.some(m=>(m.id===current.run.modelId||m.name===current.run.modelId)&&m.local);
+  const confidential=hosted?this.store.confidentialAssignments():new Set<string>();
+  for(const id of confidential)hiddenAssignments.add(id);
   let hiddenChanged=true;
   while(hiddenChanged){const before=hiddenAssignments.size;
    for(const assignment of state.assignments){const origin=this.store.assignmentOrigin(assignment);if(origin&&hiddenAssignments.has(origin))hiddenAssignments.add(assignment.id);}
@@ -435,6 +438,15 @@ Record the next accountable action with company_command {command:{type:"responsi
   const channels=new Set(state.experiences.filter(r=>r.kind==='workplace.channel').map(r=>r.id));
   state.messages=state.messages.filter(m=>!hiddenRuns.has(m.runId??'')&&(broad||m.senderId===employee.id||m.recipientId===employee.id||!!m.projectId&&projects.has(m.projectId)||m.recipientId==null&&m.projectId==null&&channels.has(m.channelId)));
   state.knowledge=state.knowledge.filter(k=>!hiddenRuns.has(k.provenance?.runId)&&!blindPeers.has(k.provenance?.authorId)&&!(k.scope==='employees'&&blindPeers.has(k.scopeId??''))&&(broad||k.scope==='company'||k.scope==='employees'&&!!k.scopeId&&canReadEmployee(k.scopeId)||k.scope==='projects'&&projects.has(k.scopeId??'')||k.scope==='products'&&products.has(k.scopeId)||k.scope==='departments'&&departments.has(k.scopeId??'')));
+  if(confidential.size){
+   const privateProjects=new Set(this.store.list('assignments').filter(a=>confidential.has(a.id)&&a.projectId).map(a=>a.projectId));
+   const privateMessages=new Set(this.store.list('assignments').filter(a=>confidential.has(a.id)).map(a=>a.payload?.messageId));
+   state.projects=state.projects.filter(p=>!privateProjects.has(p.id));
+   state.decisions=state.decisions.filter(d=>!hiddenRuns.has(d.runId??''));
+   state.messages=state.messages.filter(m=>!privateMessages.has(m.id)&&!privateProjects.has(m.projectId));
+   state.knowledge=state.knowledge.filter(k=>!privateProjects.has(k.scopeId)&&!k.generated&&!k.path.endsWith('.generated.md'));
+   state.actions=state.actions.filter(a=>!hiddenRuns.has(a.runId));
+  }
   return state;
  }
  companyRead(actor:Actor,args:any={},forPrompt=false){let result:any;
@@ -517,6 +529,15 @@ Record the next accountable action with company_command {command:{type:"responsi
  }
  async call(actor:Actor,name:string,args:any):Promise<any>{
   this.store.validateActor(actor);const {run,assignment}=this.context(actor);
+  if(!this.store.list('models').some(m=>(m.id===run.modelId||m.name===run.modelId)&&m.local)){
+   const hidden=this.store.confidentialAssignments();
+   if(hidden.size){
+    const hiddenRuns=new Set(this.store.list('runs').filter(r=>hidden.has(r.assignmentId)).map(r=>r.id));
+    const denied=new Set([...hidden,...hiddenRuns,...this.store.list('artifacts').filter(a=>hidden.has(a.assignmentId)).map(a=>a.id),...this.store.list('assignments').filter(a=>hidden.has(a.id)&&a.projectId).map(a=>a.projectId)]);
+    const references=(value:any):boolean=>typeof value==='string'?denied.has(value):Array.isArray(value)?value.some(references):value&&typeof value==='object'?Object.values(value).some(references):false;
+    if(hidden.has(assignment.id)||references(args))throw new DomainError('evidence_forbidden','Confidential evidence requires a local employee run',403);
+   }
+  }
   this.store.emit('tool.started',{runId:run.id,tool:name});
   try{
    if(this.initialVotePending(actor,assignment)){

@@ -109,3 +109,29 @@ it is not itself a billing API or a software spending cap. Do not enable an acco
 whose free exhaustion can silently charge. Unsupported official protocols require an
 adapter, not an arbitrary endpoint override. All registered routes use fixed HTTPS
 origins and reject redirects. Secrets and raw errors never enter the quota ledger.
+
+## Continuing across local and hosted engines
+
+Management can use `employee.model` with `modelId`, `fallbackModelIds` and a suitability
+rationale. The ordered alternatives apply to the employee's subsequent work; omission
+clears them. The scheduler checks current policy, inventory, cooldown and account
+availability before choosing a run engine. It preserves the preferred employee model,
+identity, assignment and workspace. Existing companies need no identity migration;
+existing selections remain unchanged until management supplies suitable alternatives.
+Pool routing still handles hosted failover inside a request. A refused initial request
+or local admission queues retained work and lets a selected alternative run. Uncertain
+runtime ownership or external effects retain the existing reconciliation gate.
+
+Use `dataClass: "confidential"` on `assignment.create` for private Owner/customer work.
+Confidential assignments and employee-created children require local inference; this
+release grants no private hosted route. Public/internal classification is a statement
+about supplied content, not permission to disclose private records. Credentials remain
+outside employee context. Never copy private material into ordinary shared work.
+
+Confidentiality follows retained review, recovery, dependency and project provenance.
+Hosted company reads withhold the linked assignments, runs, effects and generated
+narrative mirrors; private record tool references are refused. Employee prompts remain
+at least internal even for a public assignment because corporate context is supplied.
+Classification does not discover unlabeled private text: keep private inputs classified
+and never paste them into ordinary shared records. Admission waits are retained per
+selected engine, so multiple unavailable alternatives cannot alternate failed claims.

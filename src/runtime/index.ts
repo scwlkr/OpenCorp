@@ -204,6 +204,7 @@ export class LocalRuntime {
   async execute(request: ExecuteRequest): Promise<RuntimeResult> {
     if (this.stopping) throw new Error('Runtime stopping; new dispatch refused');
     const dispatchProvider:ProviderId|'pool'=request.modelId==='free-pool'?'pool':directFreeProvider(request.modelId)??(request.modelId.endsWith(':free')?'openrouter':'local');
+    if(request.dataClass==='confidential'&&dispatchProvider!=='local')throw new Error('Confidential work requires local inference');
     if(this.testingProvider===dispatchProvider)throw new ResourceAdmissionError('Provider diagnostic in progress');
     if (this.active.has(request.runId)) throw new Error('Duplicate active runtime run ID');
     if (this.active.size >= this.resources.limits.maxConcurrentTurns) throw new ResourceAdmissionError('Local resource slots occupied; retain assignment in the durable queue');
