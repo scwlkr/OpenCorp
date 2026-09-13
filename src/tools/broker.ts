@@ -320,7 +320,8 @@ Record the next accountable action with company_command {command:{type:"responsi
     (fields[name]??=new Map()).set(JSON.stringify(schema),schema);
    }
    const properties=JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(fields).map(([name,schemas])=>[name,schemas.size===1?[...schemas.values()][0]:{anyOf:[...schemas.values()]}])),(key,value)=>key==='description'?undefined:value));
-   return {...tool,description:'Fields beside command.type. Optional company_help gives exact schema. Authority/state checks apply.',inputSchema:objectSchema({command:{type:'object',properties:{type:{type:'string',enum:types},...properties},required:['type'],additionalProperties:true}},['command'])};
+   const required=branches.map((branch:any)=>`${branch.properties.type.enum[0]}: ${branch.required.filter((name:string)=>name!=='type').join(', ')}`).join('; ');
+   return {...tool,description:`Fields beside command.type. Required fields by command: ${required}. company_help gives optional fields and exact schema. Authority/state checks apply.`,inputSchema:objectSchema({command:{type:'object',properties:{type:{type:'string',enum:types},...properties},required:['type'],additionalProperties:true}},['command'])};
   });
  }
  private modelRoutingGuidance(state:ReturnType<CorporateBroker['readState']>){
@@ -384,7 +385,10 @@ Record the next accountable action with company_command {command:{type:"responsi
    return brokerTools.filter(tool=>names.has(tool.name)).map(tool=>tool.name==='company_command'?{...tool,description:'Establish or resume the assigned department, charter, duties and positions; record real obstacles. Existing authority checks remain.',inputSchema:objectSchema({command:{...commandSchema,anyOf:commandSchema.anyOf.filter(branch=>departmentFormationCommands.has(branch.properties.type.enum[0]!))}},['command'])}:tool);
   }
   const correction=!!executiveCorrectionGuide(assignment);
-  if(!correction&&!assignment.schedulerKey?.startsWith('formation:office:'))return brokerTools.filter(tool=>tool.name!=='resolve_ruby_dependencies'||this.rubyResolverEligible(assignment));
+  if(!correction&&!assignment.schedulerKey?.startsWith('formation:office:')){
+   const productTools=new Set(['commit_work','verify_product','deliver_product','communicate','prepare_preview','prepare_release','publish_release','inspect_artifact','review_work','import_pull_request']);
+   return brokerTools.filter(tool=>(assignment.projectId||!productTools.has(tool.name))&&(tool.name!=='resolve_ruby_dependencies'||this.rubyResolverEligible(assignment)));
+  }
   const names=new Set(['company_help','company_read','company_detail','company_command','propose_executive','knowledge_search','repo_inspect','repo_read','repo_pr','repo_issue','fetch_public']);
   if(correction){names.delete('propose_executive');for(const name of ['inspect_artifact','browser','skill_read'])names.add(name);}
   return brokerTools.filter(tool=>names.has(tool.name)).map(tool=>tool.name==='company_command'?{...tool,description:correction?'Record a linked executive correction or justified withdrawal through decision.create, or a required position/obstacle. Preserve assigned source and reviewedVoteIds in payload; existing authority checks remain.':'Create the required executive position or record a governance proposal/obstacle. Prefer propose_executive for the appointment proposal; existing authority checks remain.',inputSchema:objectSchema({command:{...commandSchema,anyOf:commandSchema.anyOf.filter(branch=>executiveProposalCommands.has(branch.properties.type.enum[0]!))}},['command'])}:tool);

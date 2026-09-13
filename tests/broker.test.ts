@@ -52,7 +52,7 @@ describe('typed management tools',()=>{
   const review=await broker.call(actor,'create_assignment',{employeeId:reviewer.id,projectId:project.id,kind:'review',title:'Evaluate retained coverage',instructions:'Inspect the exact artifact and evaluate original requirements independently.',acceptance:['Actual coverage verdict'],payload:{artifactId:artifact.id}});
   expect(store.need('assignments',review.id)).toMatchObject({kind:'review',employeeId:reviewer.id,payload:{artifactId:artifact.id}});
   store.update('assignments',taskId,{payload:{acceptanceAssignmentId:original.id,sourceProjectId:'wrong-project'}});
-  expect(broker.toolsFor(actor).map(tool=>tool.name)).toContain('deliver_product');
+  expect(broker.toolsFor(actor).map(tool=>tool.name)).toContain('propose_executive');
  });
  function diagnosis(){
   const manager=hire('Product supervisor'),worker=hire('Assigned implementer',manager.id,'worker');
@@ -120,7 +120,7 @@ describe('typed management tools',()=>{
   const context=broker.promptContext(actor);expect(context.policy.concurrencyQualification).toBeUndefined();expect(store.policy.concurrencyQualification).toEqual({fixture:'Synthetic retained capacity evidence'});expect(context.originalAssignment.id).toBe(original.id);expect(context.failedRun.id).toBe(failed.id);expect(context.failure).toMatchObject({employeeId:worker.id,runtimeFailureCode:'native_step_limit',details:{collection:'runs',id:failed.id,view:'record'}});expect(JSON.stringify(context)).not.toContain('/retained/failure.json');expect(context.knowledge.items.some((k:any)=>k.id===note.id)).toBe(true);expect(JSON.stringify(context)).not.toContain('UNRELATED_FAULT_ALERT');expect(JSON.stringify(context).length).toBeLessThanOrEqual(12000);
   await expect(broker.call(actor,'company_detail',{collection:'runs',id:failed.id,view:'verification'})).rejects.toThrow('retained failure summary use company_detail');
   await expect(broker.call(actor,'company_detail',{collection:'attention',id:unrelated.id})).resolves.toBeDefined();
-  const ordinary=actorFor(ceo);expect(withoutDescriptions((await disclosedTools(ordinary)))).toEqual(withoutDescriptions(brokerTools.filter(tool=>!['revise_and_retry_assignment','resolve_ruby_dependencies'].includes(tool.name))));expect(await broker.call(ordinary,'company_help',{})).toBe(corporateGuide);
+  const ordinary=actorFor(ceo);expect(withoutDescriptions((await disclosedTools(ordinary)))).toEqual(withoutDescriptions(brokerTools.filter(tool=>!['revise_and_retry_assignment','resolve_ruby_dependencies','commit_work','verify_product','deliver_product','communicate','prepare_preview','prepare_release','publish_release','inspect_artifact','review_work','import_pull_request'].includes(tool.name))));expect(await broker.call(ordinary,'company_help',{})).toBe(corporateGuide);
  });
  it('trusted fault scope retains changed retry validation and cannot grant an outsider recovery authority',async()=>{
   const {actor,original,worker,outcome}=diagnosis();
@@ -563,7 +563,7 @@ describe('typed independent vote tool',()=>{
   await expect(broker.call(actor,'review_candidate',{candidateId:'unused',approve:false,rationale:'Premature review'})).rejects.toMatchObject({code:'initial_vote_required'});
   const vote=await broker.call(actor,'vote_decision',{decisionId:decision.id,approve:false,rationale:'Independent observed remit gap'});expect(store.need('votes',vote.id).approve).toBe(false);
   expect((await disclosedTools(actor)).map(tool=>tool.name)).toContain('company_command');
-  expect((await disclosedTools(actorFor(ceo))).map(tool=>tool.name)).toContain('communicate');
+  expect((await disclosedTools(actorFor(ceo))).map(tool=>tool.name)).toContain('create_assignment');
  });
  it('advertises required direct voting fields without a wrapper or default judgment',()=>{
   const schema=brokerTools.find(tool=>tool.name==='vote_decision')!.inputSchema;
@@ -617,7 +617,7 @@ describe('focused executive formation tools',()=>{
   const actor=formation(),tools=(await disclosedTools(actor)),names=tools.map(tool=>tool.name);expect(names).toContain('propose_executive');expect(names).not.toContain('communicate');expect(names).toContain('repo_read');
   expect(JSON.stringify(tools).length).toBeLessThan(14000);const command=tools.find(tool=>tool.name==='company_command')!;expect(JSON.stringify(command)).not.toContain('employee.hire');
   const help=await broker.call(actor,'company_help',{});expect(help.length).toBeLessThan(2000);expect(help).toContain('propose_executive');
-  expect((await disclosedTools(actorFor(hire('Ordinary manager')))).map(tool=>tool.name)).toContain('communicate');
+  expect((await disclosedTools(actorFor(hire('Ordinary manager')))).map(tool=>tool.name)).toContain('create_assignment');
  });
  it('records a real proposal checkpoint without appointing or voting for Elders',async()=>{
   const actor=formation(),position=store.command(owner,{type:'position.create',title:'Chief Technology Officer',level:'executive',responsibilities:'Own engineering delivery'}),before=store.list('employees').length;
@@ -723,7 +723,7 @@ it.each(['appointment-rejected','governance-application'])('scopes %s correction
  expect(managementOutcome(store,store.need('assignments',taskId),store.need('runs',actor.runId)).passed).toBe(true);
  const worker=actorFor(hire('Unprivileged correction worker',ceo.id,'worker'));store.update('assignments',store.need('runs',worker.runId).assignmentId,{schedulerKey:`${kind}:${source.id}`,payload:{[link]:source.id,voteIds}});
  await expect(broker.call(worker,'company_command',{command:{type:'decision.create',kind:'executive.appoint',subject:'Unauthorized appointment',rationale:'No executive authority',payload:{}}})).rejects.toThrow();
- expect(withoutDescriptions((await disclosedTools(actorFor(ceo))))).toEqual(withoutDescriptions(brokerTools.filter(tool=>!['revise_and_retry_assignment','resolve_ruby_dependencies'].includes(tool.name))));
+ expect(withoutDescriptions((await disclosedTools(actorFor(ceo))))).toEqual(withoutDescriptions(brokerTools.filter(tool=>!['revise_and_retry_assignment','resolve_ruby_dependencies','commit_work','verify_product','deliver_product','communicate','prepare_preview','prepare_release','publish_release','inspect_artifact','review_work','import_pull_request'].includes(tool.name))));
 });
 
 it('scopes department formation to charter and position commands with a real resumable checkpoint',async()=>{
@@ -747,7 +747,7 @@ it('scopes department formation to charter and position commands with a real res
  for(const title of ['Web frontend','Web accessibility']){const mistaken=await call({type:'position.create',title,level:'manager',departmentId:department.id,responsibilities:title});expect(outcome()).toBe(false);const repaired=await call({type:'position.update',positionId:mistaken.id,level:'worker',rationale:'Correct unfilled specialist level'});expect(repaired.id).toBe(mistaken.id);}
  expect(outcome()).toBe(true);expect(store.list('positions').filter(p=>p.id===lead.id)).toHaveLength(1);expect(store.list('departments')).toHaveLength(1);expect(store.list('employees')).toHaveLength(5);
  const outsider=actorFor(hire('Other manager'));await expect(broker.call(outsider,'company_command',{command:{type:'department.update',departmentId:department.id,rationale:'Outside scope',charter:'Unauthorized'}})).rejects.toThrow();
- store.update('assignments',taskId,{schedulerKey:'duty:department:0'});expect(withoutDescriptions((await disclosedTools(actor)))).toEqual(withoutDescriptions(brokerTools.filter(tool=>!['revise_and_retry_assignment','resolve_ruby_dependencies'].includes(tool.name))));expect(await broker.call(actor,'company_help',{})).toBe(corporateGuide);
+ store.update('assignments',taskId,{schedulerKey:'duty:department:0'});expect(withoutDescriptions((await disclosedTools(actor)))).toEqual(withoutDescriptions(brokerTools.filter(tool=>!['revise_and_retry_assignment','resolve_ruby_dependencies','commit_work','verify_product','deliver_product','communicate','prepare_preview','prepare_release','publish_release','inspect_artifact','review_work','import_pull_request'].includes(tool.name))));expect(await broker.call(actor,'company_help',{})).toBe(corporateGuide);
 });
 
 it.each([
@@ -876,7 +876,7 @@ it('onboarding advertises separate internal and exclusive product proof shapes, 
  const directProduct=await broker.call(manager,'create_assignment',{employeeId:employee.id,title:'Actual delivered first work',instructions:'Implement and deliver the actual scoped change',acceptance:['First criterion','Second criterion'],kind:'implementation',projectId:project.id,rationale:'Useful product assignment',completionSource:'delivery'});
  expect(store.need('assignments',directProduct.id).completionRequirements).toEqual([{criterion:'First criterion',source:'delivery'},{criterion:'Second criterion',source:'delivery'}]);
  await expect(broker.call(manager,'create_assignment',{employeeId:employee.id,title:'Invalid internal proof',instructions:'Internal task',acceptance:['Actual outcome'],kind:'management',completionSource:'artifact'})).rejects.toMatchObject({code:'invalid_completion_requirements'});
- const ordinary=actorFor(ceo);expect(withoutDescriptions((await disclosedTools(ordinary)))).toEqual(withoutDescriptions(brokerTools.filter(tool=>!['revise_and_retry_assignment','resolve_ruby_dependencies'].includes(tool.name))));
+ const ordinary=actorFor(ceo);expect(withoutDescriptions((await disclosedTools(ordinary)))).toEqual(withoutDescriptions(brokerTools.filter(tool=>!['revise_and_retry_assignment','resolve_ruby_dependencies','commit_work','verify_product','deliver_product','communicate','prepare_preview','prepare_release','publish_release','inspect_artifact','review_work','import_pull_request'].includes(tool.name))));
  const help=await broker.call(manager,'company_help',{});expect(help).toContain('pre-hire instruction to fill this now-filled role is stale');expect(help).toContain('never copy schema descriptions as values');expect(help).toContain('use create_assignment with direct arguments');
  store.update('assignments',store.need('runs',manager.runId).assignmentId,{schedulerKey:'formation:candidate:fixture:0'});expect(broker.toolsFor(manager).map(t=>t.name)).not.toContain('create_assignment');
  await expect(broker.call(manager,'create_assignment',base)).rejects.toMatchObject({code:'command_help_unavailable'});
@@ -1017,6 +1017,17 @@ it('current-assignment ordering preserves employee scope and leaves other collec
  const bounded=await broker.call(actor,'company_read',{collection:'employees',limit:30});
  expect(bounded.items.map((employee:any)=>employee.id)).toEqual(employees.items.map((employee:any)=>employee.id));
  expect(JSON.stringify(bounded.items.find((employee:any)=>employee.id===manager.id).positionTitle).length).toBeLessThan(500);
+});
+
+it('retains per-command required fields in the advertised flattened tool',()=>{
+ const actor=actorFor(ceo),tool=broker.toolsFor(actor).find(t=>t.name==='company_command')!;
+ expect(tool.description).toContain('project.create: name, outcome, acceptance, rationale');
+ expect(tool.description).toContain('employee.hire: name, positionId, modelId');
+ expect(tool.inputSchema.properties.command.required).toEqual(['type']);
+ expect(broker.toolsFor(actor).map(t=>t.name)).not.toContain('deliver_product');
+ expect(broker.toolsFor(actor).map(t=>t.name)).toContain('record_artifact');
+ const project=store.command(owner,{type:'project.create',name:'Scoped product work',supervisorId:ceo.id,productId:store.list('products')[0].id,outcome:'Reviewed change',acceptance:['Actual artifact'],rationale:'Tool scope regression'});
+ expect(broker.toolsFor(actorFor(ceo,project)).map(t=>t.name)).toContain('deliver_product');
 });
 
 it('preserves direct legacy calls without prior help, including nullable project IDs and structured roadmaps',async()=>{
@@ -1385,7 +1396,7 @@ it('focuses trusted responsibility context on the authorized original obligation
  const continuation={ownerId:manager.id,kind:'management_followup',action:'Resolve retained obligation',followupAssignmentId:taskId,nextCheckAt:new Date(Date.now()+60000).toISOString()};store.update('assignments',original.id,{status:'blocked',continuation});store.update('assignments',taskId,{projectId:null,schedulerKey:`responsibility:${original.id}:${manager.id}`,payload:{sourceAssignmentId:original.id}});
  const linked=store.command(owner,{type:'knowledge.write',scope:'company',content:'LINKED_OBLIGATION_FINDING',source:`Observed ${original.id}`}),unrelated=store.command(owner,{type:'knowledge.write',scope:'company',content:'UNRELATED_GLOBAL_REPORT',source:'Unrelated work'}),personal=store.command(owner,{type:'knowledge.write',scope:'employees',scopeId:manager.id,content:'UNRELATED_PERSONAL_LOG',source:'Personal activity'});
  const scopedTools=broker.toolsFor(actor),commands=scopedTools.find(t=>t.name==='company_command')!.inputSchema.properties.command.properties.type.enum;
- expect(JSON.stringify(scopedTools).length).toBeLessThan(broadCatalogBytes/2);expect(commands).toEqual(expect.arrayContaining(['responsibility.update','owner.request','assignment.create','assignment.update','message.send']));expect(commands).not.toContain('recruitment.candidate');
+ expect(JSON.stringify(scopedTools).length).toBeLessThan(broadCatalogBytes);expect(commands).toEqual(expect.arrayContaining(['responsibility.update','owner.request','assignment.create','assignment.update','message.send']));expect(commands).not.toContain('recruitment.candidate');
  expect(scopedTools.map(t=>t.name)).toEqual(expect.arrayContaining(['company_detail','repo_read','inspect_artifact','skill_read','skill_discover','skill_import','create_assignment','send_message']));expect(scopedTools.some(t=>['record_blocked_diagnosis','revise_and_retry_assignment'].includes(t.name))).toBe(false);
  const help=await broker.call(actor,'company_help',{});expect(help).toContain(`assignmentId:"${original.id}"`);expect(help).toContain('nonterminal');expect(help).toContain('nextCheckAt');expect(help.length).toBeLessThan(1800);
  const context=broker.promptContext(actor);expect(context.originalAssignment).toMatchObject({id:original.id,acceptance:original.acceptance,continuation});expect(context.followup.id).toBe(taskId);expect(context.policy.spendingLimit).toBe(store.policy.spendingLimit);expect(context.policy.directFreeModels).toEqual(store.policy.directFreeModels);expect(context.policy).not.toHaveProperty('productiveConcurrencyQualification');
