@@ -28,4 +28,8 @@ export function migrate(db: Database.Database): void {
       CREATE VIRTUAL TABLE knowledge_fts USING fts5(id UNINDEXED, title, content, scope, tokenize='unicode61');`);
     db.prepare('INSERT INTO migrations VALUES(1,?)').run(new Date().toISOString());
   })();
+  if(version<2)db.transaction(()=>{
+    db.exec("CREATE INDEX assignments_scheduler_key ON assignments(json_extract(data,'$.schedulerKey'),created_at)");
+    db.prepare('INSERT INTO migrations VALUES(2,?)').run(new Date().toISOString());
+  })();
 }

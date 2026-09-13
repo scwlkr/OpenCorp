@@ -1,0 +1,3 @@
+# Markdown-led company behavior
+
+OpenCorp's company behavior is expressed primarily through concise Markdown instructions and employee skills that agents interpret and improve. Before adding code, ask whether Markdown guidance and an existing tool can do the job; bespoke deterministic business workflows require a concrete justification. This favors rapid adaptation and agent judgment while retaining necessary execution, transport, persistence, recovery, resource controls, verified approvals and permission/spending enforcement; reuse established infrastructure, with OpenClaw as a reference to evaluate rather than a required dependency.

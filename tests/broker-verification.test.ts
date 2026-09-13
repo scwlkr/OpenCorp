@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CompanyStore } from '../src/storage/store.js';
@@ -51,3 +52,16 @@ describe('verification dependency and dispatch boundary',()=>{
   await broker.cancel();expect(await observed).toBeInstanceOf(Error);expect(execute).not.toHaveBeenCalled();
  });
 });
+
+ it('reports bounded dirty paths when an exit-zero verifier changes tracked source and generates test data',async()=>{
+  const git=(args:string[])=>execFileSync('git',['-C',project.workspace!,...args],{encoding:'utf8'}).trim();
+  git(['init']);const unusual=' tracked\nname.txt';writeFileSync(join(project.workspace!,unusual),'original');writeFileSync(join(project.workspace!,'tracked.txt'),'original source');git(['add','--all']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','Fixture']);
+  artifact=store.update('artifacts',artifact.id,{identity:git(['rev-parse','HEAD'])});
+  vi.mocked(broker.workspaces.head).mockImplementation(async()=>git(['rev-parse','HEAD']));vi.mocked(broker.workspaces.clean).mockImplementation(async()=>!git(['status','--porcelain']));vi.spyOn(broker.workspaces,'git').mockImplementation(async(_project,args)=>git(args));
+  execute.mockImplementation(async()=>({code:0,stdout:execFileSync(process.execPath,['-e',`const fs=require('fs');fs.writeFileSync(${JSON.stringify(unusual)},'changed');fs.writeFileSync('tracked.txt','changed content never included in diagnostic');fs.mkdirSync('test-ledger');for(let i=0;i<25;i++)fs.writeFileSync('test-ledger/event-'+i+'.json','private fixture contents');console.log('checks passed');`],{cwd:project.workspace,encoding:'utf8'}),stderr:''}));
+  const result=await broker.call(actor,'verify_product',{artifactId:artifact.id});expect(result).toMatchObject({status:'failed',exitCode:0,unchanged:false,headChanged:false,changedPathsTruncated:true});expect(result.changedPaths).toHaveLength(20);expect(result.changedPaths).toContain('tracked.txt');expect(result.changedPaths).toContain(unusual);expect(result.detail).toContain(JSON.stringify(unusual));expect(result.changedPaths.some((p:string)=>p.startsWith('test-ledger/'))).toBe(true);expect(result.detail).toContain('do not commit generated data');expect(result.detail).not.toContain('private fixture contents');expect(readFileSync(result.logPath,'utf8')).toContain(result.detail);expect(store.need('artifacts',artifact.id).verification.passed).toBe(false);
+ });
+ it('distinguishes clean HEAD drift from generated data without relaxing verification',async()=>{
+  vi.mocked(broker.workspaces.head).mockResolvedValueOnce(artifact.identity).mockResolvedValueOnce(artifact.identity).mockResolvedValue('c'.repeat(40));
+  const result=await broker.call(actor,'verify_product',{artifactId:artifact.id});expect(result).toMatchObject({status:'failed',exitCode:0,unchanged:false,headChanged:true,changedPaths:[]});expect(result.detail).toContain('HEAD changed');expect(result.detail).not.toContain('generated test data');
+ });

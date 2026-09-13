@@ -18,6 +18,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 });
 const owner = { kind: 'owner' } as const;
 const mismatch = "The dependencies in your gemfile changed, but the lockfile can't be updated\nbecause frozen mode is set\n\nYou have added to the Gemfile:\n* fixture-gem (~> 2.0)\n\nYou have deleted from the Gemfile:\n* fixture-gem\n";
+const deletedMismatch = mismatch.replace("The dependencies in your gemfile changed, but the lockfile can't be updated\nbecause frozen mode is set\n", "Some dependencies were deleted from your gemfile, but the lockfile can't be\nupdated because frozen mode is set\n");
 let root: string, workspace: string, store: CompanyStore, broker: CorporateBroker, subject: Scheduler;
 let assignmentId: string, runId: string, runtime: ReturnType<typeof vi.fn<(request: ExecuteRequest) => Promise<never>>>;
 let checkResult: { code: number; stdout: string; stderr: string };
@@ -59,7 +60,8 @@ function onInstall(callback: (options: Parameters<typeof executeSandboxed>[0]) =
 }
 
 describe('implementation access after a proven frozen Bundler lock mismatch', () => {
-  it('admits the actual editor with honest failure evidence, preserving dependency files and canonical dependency status', async () => {
+  it.each([mismatch, deletedMismatch])('admits the actual editor with honest failure evidence for %s', async diagnostic => {
+    checkResult.stderr = diagnostic;
     const before = ['Gemfile', 'Gemfile.lock'].map(name => readFileSync(join(workspace, name)));
     await execute();
     expect(runtime, store.need('runs', runId).error).toHaveBeenCalledOnce();
@@ -79,8 +81,8 @@ describe('implementation access after a proven frozen Bundler lock mismatch', ()
     expect(store.need('runs', runId).dependencyPreparation).toEqual(preparation);
   });
 
-  it.each([1, 124, 130])('does not admit another failure/cancellation code %i even with matching prose', async code => {
-    checkResult.code = code; await execute();
+  it.each([mismatch, deletedMismatch].flatMap(diagnostic => [1, 124, 130].map(code => ({ diagnostic, code }))))('does not admit another failure/cancellation code $code even with matching prose', async ({code, diagnostic}) => {
+    checkResult.stderr = diagnostic; checkResult.code = code; await execute();
     expect(runtime).not.toHaveBeenCalled(); expect(store.need('runs', runId).dependencyPreparation.repair).toBeUndefined();
   });
 

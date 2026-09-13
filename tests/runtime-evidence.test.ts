@@ -65,3 +65,14 @@ describe('failure provenance before runtime cleanup', () => {
     await expect(readFile(paths.messagesPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
+
+import { untouchedCapacityRefusal } from '../src/runtime/evidence.js';
+it('requires a native capacity error and a complete empty first assistant turn, not zero usage alone',()=>{
+ const cause={name:'APIError',data:{statusCode:400,responseBody:JSON.stringify({error:{code:'provider_capacity_wait'}})}};
+ const error=new Error('Native error',{cause}),reply={info:{role:'assistant',error:cause},parts:[]} as any;
+ expect(untouchedCapacityRefusal(error,[reply])).toBe(true);
+ for(const messages of [undefined,[],[{...reply,parts:[{type:'text',text:'partial output'}]}],[{...reply,parts:[{type:'tool',state:{status:'pending'}}]}],[reply,reply]])expect(untouchedCapacityRefusal(error,messages as any)).toBe(false);
+ expect(untouchedCapacityRefusal(error,[{...reply,info:{...reply.info,error:{name:'APIError',data:{statusCode:403}}}}])).toBe(false);
+ expect(untouchedCapacityRefusal(new Error('Unrelated cleanup failure'),[reply])).toBe(false);
+ expect(untouchedCapacityRefusal(new Error('Other provider error',{cause:{...cause,data:{...cause.data,responseBody:'{}'}}}),[reply])).toBe(false);
+});

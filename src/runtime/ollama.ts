@@ -6,6 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { minimalEnvironment, prepareHome, spawnOwned, stopOwned, recoverOwnedReceipt, type OwnedProcess } from './processes.js';
+import { resourceLimits, ResourceAdmissionError } from './resource-budget.js';
 import { MODEL_ALIASES, CONTEXT_TOKENS, type LocalModel, type LocalInferenceProfile, type RuntimeOptions } from './types.js';
 
 const digest = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
@@ -18,15 +19,37 @@ function manifestBlobs(raw: Buffer): ModelBlob[] {
   return blobs;
 }
 
+/** New candidates are never added to the existing default download set. */
+export function microInstallSelection(ids:unknown=['micro-06','micro-17']):Array<'micro-06'|'micro-17'|'micro-4'> {
+  if(!Array.isArray(ids)||!ids.length||ids.length>3||new Set(ids).size!==ids.length||ids.some(id=>!['micro-06','micro-17','micro-4'].includes(id)))throw new Error('Select exact micro model IDs: micro-06, micro-17 or micro-4');
+  return [...ids];
+}
+
 /** Owned inference behavior is distinct from the shared source model. */
-export function localInferenceProfile(modelId: string): LocalInferenceProfile | undefined {
-  return modelId === 'qwen-main' ? { id: 'qwen-no-thinking-v1', reasoningEffort: 'none' } : undefined;
+export function localInferenceProfile(modelId: string, nemotronProfile?: RuntimeOptions['nemotronInferenceProfile']): LocalInferenceProfile | undefined {
+  if (modelId === 'qwen-low-reasoning-48k') return { id: 'qwen-low-reasoning-v1', reasoningEffort: 'low' };
+  if (modelId === 'nemotron-no-thinking-v1') return { id: 'nemotron-no-thinking-v1', reasoningEffort: 'none' };
+  if (modelId === 'nemotron' && nemotronProfile === 'nemotron-no-thinking-v1') return { id: nemotronProfile, reasoningEffort: 'none' };
+  return modelId === 'qwen-main' || modelId === 'qwen-main-48k' || modelId.startsWith('micro-') ? { id: 'qwen-no-thinking-v1', reasoningEffort: 'none' } : undefined;
 }
 
 export function localArtifactIdentity(model: Pick<LocalModel, 'alias' | 'manifestDigest' | 'templateDigest' | 'parametersDigest' | 'contextTokens' | 'inferenceProfile'>): string {
   const { alias, manifestDigest, templateDigest, parametersDigest, contextTokens, inferenceProfile } = model;
   return digest(JSON.stringify({ alias, manifestDigest, templateDigest, parametersDigest, contextTokens, cloudDisabled: true,
     ...(inferenceProfile ? { inferenceProfile } : {}) }));
+}
+
+
+/** Resolve explicit selections first; shared weight aliases always select the default entry. */
+export function selectLocalModel(models: LocalModel[], selection: string): LocalModel | undefined {
+  return models.find(model => model.id === selection)
+    ?? models.find(model => !['nemotron-no-thinking-v1', 'qwen-main-48k', 'qwen-low-reasoning-48k'].includes(model.id) && (model.alias === selection || model.sourceAlias === selection))
+    ?? models.find(model => ['nemotron-no-thinking-v1', 'qwen-main-48k', 'qwen-low-reasoning-48k'].includes(model.id) && model.name === selection);
+}
+
+/** The virtual profile shares weights, but must not overwrite their default inventory row. */
+export function localModelSelectionId(model: Pick<LocalModel, 'id' | 'sourceAlias'>): string {
+  return ['nemotron-no-thinking-v1', 'qwen-main-48k', 'qwen-low-reasoning-48k'].includes(model.id) ? model.id : model.sourceAlias;
 }
 
 export async function availablePort(): Promise<number> {
@@ -47,17 +70,23 @@ export class OwnedOllama {
   private generation = 0;
   private startup?: AbortController;
   private output = '';
+  private inventoryTail: Promise<unknown> = Promise.resolve();
+  private inventoryAbort = new AbortController();
+  private stopping?: Promise<void>;
   url = '';
   readonly modelStore: string;
   readonly sourceModelStore: string;
   readonly root: string;
-  constructor(private readonly options: RuntimeOptions) {
-    this.root = join(options.dataRoot, 'runtime', 'ollama');
+  constructor(private readonly options: RuntimeOptions, private readonly pool: 'primary' | 'micro' = 'primary') {
+    this.root = join(options.dataRoot, 'runtime', pool === 'micro' ? 'ollama-micro' : 'ollama');
     this.sourceModelStore = options.modelStore ?? join(homedir(), '.ollama', 'models');
     this.modelStore = join(this.root, 'models');
   }
 
+  private aliases() { return Object.entries(MODEL_ALIASES).filter(([id]) => id.startsWith('micro-') === (this.pool === 'micro')); }
+
   async start(): Promise<void> {
+    if (this.stopping) throw new Error('Owned Ollama is stopping');
     if (this.process?.exitCode === null && this.url) return;
     if (this.starting) return this.starting;
     const generation = this.generation;
@@ -104,7 +133,7 @@ export class OwnedOllama {
       } else if (!entry.isDirectory()) throw new Error('Owned blobs must be an ordinary directory');
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     await mkdir(blobs, { recursive: true, mode: 0o700 });
-    for (const alias of Object.values(MODEL_ALIASES)) {
+    for (const [, alias] of this.aliases()) {
       signal.throwIfAborted();
       let raw: Buffer;
       try { raw = await readFile(this.manifestPath(this.sourceModelStore, alias)); }
@@ -117,7 +146,7 @@ export class OwnedOllama {
     }
     // Preserve available generated layers during legacy migration. Missing
     // derived metadata is recreated from the permitted owned source in models().
-    for (const id of Object.keys(MODEL_ALIASES)) for (const context of [16384, 32768]) {
+    for (const [id] of this.aliases()) for (const context of (id === 'qwen-main' ? [16384, 32768, 49152] : [16384, 32768])) {
       signal.throwIfAborted();
       let raw: Buffer;
       try { raw = await readFile(this.manifestPath(this.modelStore, `opencorp-${id}-${context}:latest`)); }
@@ -152,6 +181,8 @@ export class OwnedOllama {
     signal.throwIfAborted();
     this.url = `http://127.0.0.1:${port}`;
     const binary = this.options.ollamaBinary ?? '/Applications/Ollama.app/Contents/Resources/ollama';
+    const limits = resourceLimits(this.options.resourceBudget);
+    const parallel = this.pool === 'micro' ? Math.min(10, limits.maxSocialTurns, limits.maxConcurrentTurns) : (limits.productiveRemoteModelId||limits.productiveRemoteProfiles) ? 1 : limits.maxProductiveTurns;
     const child = await spawnOwned({
       controlRoot: join(this.options.dataRoot, 'runtime', 'control'), command: binary,
       args: ['serve'], cwd: this.root,
@@ -159,9 +190,9 @@ export class OwnedOllama {
       env: {
         ...minimalEnvironment(this.root), OLLAMA_HOST: `127.0.0.1:${port}`,
         OLLAMA_MODELS: this.modelStore, OLLAMA_NO_CLOUD: '1',
-        OLLAMA_CONTEXT_LENGTH: String(CONTEXT_TOKENS), OLLAMA_NUM_PARALLEL: '1',
+        OLLAMA_CONTEXT_LENGTH: String(CONTEXT_TOKENS), OLLAMA_NUM_PARALLEL: String(parallel),
         OLLAMA_MAX_LOADED_MODELS: '1', OLLAMA_KEEP_ALIVE: '60s',
-        OLLAMA_MAX_QUEUE: '1', OLLAMA_FLASH_ATTENTION: '1', OLLAMA_KV_CACHE_TYPE: 'q8_0',
+        OLLAMA_MAX_QUEUE: String(limits.maxConcurrentTurns), OLLAMA_FLASH_ATTENTION: '1', OLLAMA_KV_CACHE_TYPE: 'q8_0',
       },
       onOutput: (chunk) => { this.output = (this.output + chunk).slice(-16000); },
     });
@@ -180,7 +211,7 @@ export class OwnedOllama {
           await writeFile(join(this.root, 'service.json'), JSON.stringify({
             url: this.url, guardianPid: child.pid, ownerPid: process.pid,
             version: await response.json(), cloudDisabled: true,
-            contextTokens: CONTEXT_TOKENS, concurrentInference: 1, modelStore: this.modelStore,
+            contextTokens: CONTEXT_TOKENS, concurrentInference: parallel, maxLoadedModels: 1, pool: this.pool, modelStore: this.modelStore,
           }, null, 2), { mode: 0o600 });
           return;
         }
@@ -191,14 +222,27 @@ export class OwnedOllama {
     throw new Error(`Owned Ollama startup timed out: ${this.output}`);
   }
 
-  async ensureSmallModel(): Promise<void> {
-    const tags = await this.tags();
-    if (tags.some((model) => model.name === MODEL_ALIASES.small)) return;
-    this.options.onEvent?.({ type: 'model.download', payload: { alias: MODEL_ALIASES.small, status: 'starting' } });
+  async ensureSmallModel(): Promise<void> { await this.ensureModel('small'); }
+
+  async ensureMicroModels(ids?:unknown): Promise<void> {
+    const selected=microInstallSelection(ids), signal=this.inventoryAbort.signal;
+    for(const id of selected){signal.throwIfAborted();await this.ensureModel(id);}
+  }
+
+  private async ensureModel(id: keyof typeof MODEL_ALIASES): Promise<void> {
+    if (this.stopping) throw new Error('Owned Ollama is stopping');
+    const signal = this.inventoryAbort.signal;
+    signal.throwIfAborted();
+    if (!this.aliases().some(([allowed]) => allowed === id)) throw new Error('Model is outside this owned inference pool');
+    const alias = MODEL_ALIASES[id];
+    const tags = await this.tags(signal);
+    signal.throwIfAborted();
+    if (tags.some((model) => model.name === alias)) return;
+    this.options.onEvent?.({ type: 'model.download', payload: { alias, status: 'starting' } });
     const response = await fetch(`${this.url}/api/pull`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: MODEL_ALIASES.small, stream: true }),
-      signal: AbortSignal.timeout(30 * 60 * 1000),
+      body: JSON.stringify({ model: alias, stream: true }),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(30 * 60 * 1000)]),
     });
     if (!response.ok || !response.body) throw new Error(`Local small-model download failed: ${await response.text()}`);
     let buffer = '';
@@ -212,21 +256,50 @@ export class OwnedOllama {
         this.options.onEvent?.({ type: 'model.download', payload: update });
       }
     }
+    if (buffer.trim()) {
+      const final = JSON.parse(buffer) as { error?: string };
+      if (final.error) throw new Error(`Local model download: ${final.error}`);
+    }
+    signal.throwIfAborted();
+    const installed = (await this.tags(signal)).find(model => model.name === alias);
+    if (!installed || installed.remote_host || installed.remote_model) throw new Error('Downloaded local model absent or hosted');
+    await this.checkedManifest(alias, installed.digest);
+    signal.throwIfAborted();
+    await writeFile(join(this.root, `${id}.download.json`), JSON.stringify({ alias, manifestDigest: installed.digest,
+      size: installed.size, source: `https://ollama.com/library/${alias}`, downloadedAt: new Date().toISOString(),
+      modelStore: this.modelStore, localOnly: true }, null, 2), { mode: 0o600 });
   }
 
-  private async tags(): Promise<Array<{ name: string; digest: string; size: number; remote_host?: string; remote_model?: string }>> {
-    const response = await fetch(`${this.url}/api/tags`, { signal: AbortSignal.timeout(10000) });
+  private async tags(signal: AbortSignal = this.inventoryAbort.signal): Promise<Array<{ name: string; digest: string; size: number; remote_host?: string; remote_model?: string }>> {
+    const response = await fetch(`${this.url}/api/tags`, { signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]) });
     if (!response.ok) throw new Error(`Owned Ollama model inventory HTTP ${response.status}`);
     return (await response.json() as { models: Array<{ name: string; digest: string; size: number }> }).models;
   }
 
-  async models(contextTokens: 16384 | 32768 = CONTEXT_TOKENS): Promise<LocalModel[]> {
+  async models(contextTokens: 16384 | 32768 | 49152 = CONTEXT_TOKENS): Promise<LocalModel[]> {
+    if (this.stopping) throw new Error('Owned Ollama is stopping');
+    const generation = this.generation, signal = this.inventoryAbort.signal;
+    const pending = this.inventoryTail.then(() => {
+      signal.throwIfAborted();
+      if (generation !== this.generation) throw new Error('Owned model inventory superseded by stop');
+      return this.readModels(contextTokens, signal);
+    });
+    this.inventoryTail = pending.catch(() => {});
+    return pending;
+  }
+
+  private async readModels(contextTokens: 16384 | 32768 | 49152, signal: AbortSignal): Promise<LocalModel[]> {
+    signal.throwIfAborted();
     await this.start();
-    const tags = await this.tags();
+    signal.throwIfAborted();
+    const tags = await this.tags(signal);
     const models: LocalModel[] = [];
-    for (const [id, sourceAlias] of Object.entries(MODEL_ALIASES)) {
+    for (const [id, sourceAlias] of this.aliases()) {
+      if (contextTokens === 49152 && id !== 'qwen-main') continue;
+      signal.throwIfAborted();
       const sourceTag = tags.find((model) => model.name === sourceAlias);
       if (!sourceTag) continue;
+      if (this.pool === 'micro' && sourceTag.size > (id === 'micro-4' ? 3 : 2) * 1024 ** 3) throw new Error('Micro pool refuses weights larger than the selected artifact budget');
       if (sourceTag.remote_host || sourceTag.remote_model) throw new Error(`Hosted source refused: ${sourceAlias}`);
       const alias = `opencorp-${id}-${contextTokens}:latest`;
       let tag = tags.find((model) => model.name === alias);
@@ -242,10 +315,10 @@ export class OwnedOllama {
         const created = await fetch(`${this.url}/api/create`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ model: alias, from: sourceAlias, parameters: { num_ctx: contextTokens, num_predict: 4096, temperature: 0.2 }, stream: false }),
-          signal: AbortSignal.timeout(60000),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(60000)]),
         });
         if (!created.ok) throw new Error(`Cannot prepare isolated local profile: ${await created.text()}`);
-        tag = (await this.tags()).find((entry) => entry.name === alias);
+        tag = (await this.tags(signal)).find((entry) => entry.name === alias);
         if (!tag) throw new Error('Created local profile absent from inventory');
         if (repairDigest && tag.digest !== repairDigest) throw new Error('Recreated local profile identity changed');
         await writeFile(profileSourcePath, sourceTag.digest, { mode: 0o600 });
@@ -255,7 +328,7 @@ export class OwnedOllama {
       const manifestDigest = digest(raw);
       const response = await fetch(`${this.url}/api/show`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ model: alias }), signal: AbortSignal.timeout(10000),
+        body: JSON.stringify({ model: alias }), signal: AbortSignal.any([signal, AbortSignal.timeout(10000)]),
       });
       if (!response.ok) throw new Error(`Cannot inspect local artifact ${alias}`);
       const show = await response.json() as { template?: string; parameters?: string; capabilities?: string[]; remote_host?: string; remote_model?: string };
@@ -264,35 +337,81 @@ export class OwnedOllama {
       // Ollama renders parameter maps in unspecified order. Identity tracks
       // their values, not incidental map iteration ordering between requests.
       const parametersDigest = digest((show.parameters ?? '').split('\n').map((line) => line.trim()).filter(Boolean).sort().join('\n'));
-      const inferenceProfile = localInferenceProfile(id);
+      const inferenceProfile = localInferenceProfile(id, this.options.nemotronInferenceProfile);
       const artifactIdentity = localArtifactIdentity({ alias, manifestDigest, templateDigest, parametersDigest, contextTokens, inferenceProfile });
-      models.push({ id, name: sourceAlias, alias, sourceAlias, provider: 'ollama', local: true, available: true,
+      models.push({ id: contextTokens === 49152 ? 'qwen-main-48k' : id, name: contextTokens === 49152 ? 'Qwen (48K context)' : sourceAlias, alias, sourceAlias, provider: 'ollama', local: true, available: true,
         manifestDigest, templateDigest, parametersDigest, artifactIdentity, ...(inferenceProfile ? { inferenceProfile } : {}),
-        size: tag.size, capabilities: show.capabilities ?? [], contextTokens });
+        size: tag.size, sizeClass: id.startsWith('micro-') ? 'micro' : id === 'small' ? 'small' : 'large', capabilities: show.capabilities ?? [], contextTokens });
+      // Current Qwen GGUF Jinja template explicitly supports the qualitative low cue.
+      if (contextTokens === 49152 && show.capabilities?.includes('thinking') && show.template?.includes("resolved_reasoning_effort == 'low'") && show.template.includes('Reasoning effort is set to low.')) {
+        const variant = { ...models.at(-1)!, id: 'qwen-low-reasoning-48k', name: 'Qwen (48K low reasoning)', inferenceProfile: localInferenceProfile('qwen-low-reasoning-48k') };
+        models.push({ ...variant, artifactIdentity: localArtifactIdentity(variant) });
+      }
     }
+    if (contextTokens !== 49152 && this.pool === 'primary') models.push(...await this.readModels(49152, signal));
+    const nemotron = models.find(model => model.id === 'nemotron');
+    if (nemotron && !this.options.nemotronInferenceProfile) {
+      const variant = { ...nemotron, id: 'nemotron-no-thinking-v1', name: 'Nemotron (no thinking)', inferenceProfile: localInferenceProfile('nemotron-no-thinking-v1') };
+      models.push({ ...variant, artifactIdentity: localArtifactIdentity(variant) });
+    }
+    signal.throwIfAborted();
     return models;
   }
 
+  /** Called under runtime admission serialization; never evicts a model with active turns. */
+  async prepareResidency(model: LocalModel, mayEvict: boolean, signal: AbortSignal): Promise<number> {
+    const combined = AbortSignal.any([signal, this.inventoryAbort.signal]);
+    const loaded = async () => {
+      combined.throwIfAborted();
+      const response = await fetch(`${this.url}/api/ps`, { signal: AbortSignal.any([combined, AbortSignal.timeout(10000)]) });
+      if (!response.ok) throw new Error(`Owned model residency HTTP ${response.status}`);
+      const body = await response.json() as { models: Array<{ name: string; digest: string; size_vram: number }> };
+      if (!Array.isArray(body.models)) throw new Error('Invalid owned residency observation');
+      return body.models;
+    };
+    let residents = await loaded();
+    for (const resident of residents.filter(entry => entry.name !== model.alias || entry.digest !== model.manifestDigest)) {
+      if (!mayEvict) throw new ResourceAdmissionError('Owned model pool is occupied by another active profile');
+      const response = await fetch(`${this.url}/api/generate`, { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: resident.name, keep_alive: 0, stream: false }), signal: AbortSignal.any([combined, AbortSignal.timeout(30000)]) });
+      if (!response.ok) throw new Error(`Owned idle model unload HTTP ${response.status}`);
+      await response.text();
+    }
+    residents = await loaded();
+    if (residents.some(entry => entry.name !== model.alias || entry.digest !== model.manifestDigest)) throw new Error('Owned idle model still resident after unload');
+    const resident = residents.find(entry => entry.name === model.alias && entry.digest === model.manifestDigest);
+    return resident && Number.isFinite(resident.size_vram) && resident.size_vram > 0 ? Math.min(model.size * 1.2, resident.size_vram) : 0;
+  }
+
   async verifyIdentity(model: LocalModel): Promise<void> {
-    if (JSON.stringify(model.inferenceProfile) !== JSON.stringify(localInferenceProfile(model.id))
+    if (JSON.stringify(model.inferenceProfile) !== JSON.stringify(localInferenceProfile(model.id, this.options.nemotronInferenceProfile))
       || localArtifactIdentity(model) !== model.artifactIdentity) throw new Error('Local inference profile identity changed; inference refused');
     const [name, version] = model.alias.split(':');
     const raw = await readFile(join(this.modelStore, 'manifests', 'registry.ollama.ai', 'library', name!, version!));
     if (digest(raw) !== model.manifestDigest) throw new Error('Model alias changed during run; inference refused');
   }
 
-  status(): { url: string; guardianPid?: number; running: boolean; cloudDisabled: true; concurrentInference: 1 } {
+  status(): { url: string; guardianPid?: number; running: boolean; cloudDisabled: true; concurrentInference: number } {
     return { url: this.url, guardianPid: this.process?.pid, running: this.process?.exitCode === null,
-      cloudDisabled: true, concurrentInference: 1 };
+      cloudDisabled: true, concurrentInference: this.pool === 'micro' ? Math.min(10, resourceLimits(this.options.resourceBudget).maxSocialTurns, resourceLimits(this.options.resourceBudget).maxConcurrentTurns) : (resourceLimits(this.options.resourceBudget).productiveRemoteModelId||resourceLimits(this.options.resourceBudget).productiveRemoteProfiles) ? 1 : resourceLimits(this.options.resourceBudget).maxProductiveTurns };
   }
 
   async stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    const pending = this.stopPool(); this.stopping = pending;
+    try { await pending; } finally { if (this.stopping === pending) this.stopping = undefined; }
+  }
+
+  private async stopPool(): Promise<void> {
     this.generation++; this.startup?.abort(new Error('Owned Ollama stopped during startup'));
-    const starting = this.starting;
+    this.inventoryAbort.abort(new Error('Owned model inventory cancelled by stop'));
+    this.inventoryAbort = new AbortController();
+    const starting = this.starting, inventory = this.inventoryTail;
     const child = this.process; this.process = undefined;
-    await stopOwned(child);
-    if (starting) await starting.catch(() => {});
+    const results = await Promise.allSettled([stopOwned(child), starting?.catch(() => {}), inventory.catch(() => {})]);
     this.url = '';
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
   }
 }
 

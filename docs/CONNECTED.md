@@ -1,5 +1,7 @@
 # Connected application capabilities
 
+These are current scoped adapters, not the complete company toolset. [COMPANY.md](../COMPANY.md) defines the intended operating model; the [implementation plan](https://github.com/scwlkr/OpenCorp/issues/1) covers missing integrations.
+
 OpenCorp uses installed Playwright MCP 0.0.80 and macOS Automator MCP 0.4.7 from its own service. These adapters do not depend on the builder's browser or Codex session.
 
 ## Product previews and inspection
@@ -26,7 +28,7 @@ Public research still uses the explicit `researchHosts` HTTPS allowlist in `src/
 
 `system_version` invokes the fixed macOS Automator system information script. `reveal_path` reveals a relative path from the assigned product workspace in Finder using fixed JXA with a safely encoded path. It rejects outside, hidden, credential, symlink, and hard-linked file paths. It does not open or execute the file and cannot accept arbitrary AppleScript/JXA. The broker rechecks current authority after MCP initialization and immediately before dispatch.
 
-The doctor checks the installed macOS MCP tool catalog without invoking Finder or requesting Automation consent. An actual Finder reveal can report a macOS Automation permission requirement; the adapter cannot grant OS consent. Native application control beyond these three operations is unavailable in the first release. Prefer existing product provider APIs and repository adapters for releases and communications.
+The doctor checks the installed macOS MCP tool catalog without invoking Finder or requesting Automation consent. An actual Finder reveal can report a macOS Automation permission requirement; the adapter cannot grant OS consent. Native application control beyond these three operations is unavailable in this adapter. Prefer existing product provider APIs and repository adapters for releases and communications.
 
 ## Runtime integration
 

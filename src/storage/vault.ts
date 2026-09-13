@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -16,6 +17,50 @@ function files(root: string): string[] {
   return result;
 }
 function copyTree(source: string,destination: string) { mkdirSync(destination,{recursive:true,mode:0o700}); for (const file of files(source)) { const output=join(destination,relative(source,file)); mkdirSync(dirname(output),{recursive:true,mode:0o700}); copyFileSync(file,output); } }
+
+interface ManagedAssets { skills:Array<{id:string;sourceHash:string;licenseHash:string}>; tools:Array<{productId:string;identities:string[];bundle:string;main:string}> }
+const git=(args:string[])=>execFileSync('/usr/bin/git',['-c','core.hooksPath=/dev/null','-c','protocol.file.allow=always',...args],{encoding:'utf8',timeout:30_000,maxBuffer:2*1024*1024,env:{PATH:process.env.PATH,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_TERMINAL_PROMPT:'0'}}).trim();
+function ownedPath(root:string,path:string){
+ const absolute=resolve(root,path),resolvedRoot=realpathSync(root);
+ if(!absolute.startsWith(`${resolve(root)}${sep}`))throw new DomainError('invalid_backup','Managed asset path escapes owned storage');
+ let current=resolve(root);
+ for(const segment of relative(root,absolute).split(sep)){current=join(current,segment);if(existsSync(current)&&(lstatSync(current).isSymbolicLink()||!realpathSync(current).startsWith(`${resolvedRoot}${sep}`)))throw new DomainError('invalid_backup','Managed assets cannot use symlinks or external storage');}
+ return absolute;
+}
+function additiveFiles(source:string,destination:string,apply=false,prefix=''){
+ if(!existsSync(source))return;
+ for(const file of files(source)){
+  const target=ownedPath(destination,join(prefix,relative(source,file)));
+  if(existsSync(target)&&(!lstatSync(target).isFile()||digest(readFileSync(target))!==digest(readFileSync(file))))throw new DomainError('restore_asset_conflict',`Retained managed file differs; preserve and inspect before restore: ${target}`,409);
+  if(apply&&!existsSync(target)){mkdirSync(dirname(target),{recursive:true,mode:0o700});copyFileSync(file,target);}
+ }
+}
+function safeRepository(repository:string){
+ if(!lstatSync(repository).isDirectory())throw new DomainError('invalid_backup','Owned repository must be a directory');
+ const inspect=(directory:string)=>{for(const name of readdirSync(directory)){const path=join(directory,name),stat=lstatSync(path);if(stat.isSymbolicLink())throw new DomainError('invalid_backup','Owned tool repository contains a symlink');if(stat.isDirectory())inspect(path);}};inspect(repository);
+ if(existsSync(join(repository,'objects/info/alternates')))throw new DomainError('invalid_backup','Owned tool repository cannot depend on external object stores');
+}
+function expectedAssets(records:Record<string,any[]>):ManagedAssets {
+ const skills=records.experiences.filter(r=>r.kind==='skill-source').map(r=>{
+  if(!/^[a-f0-9]{64}$/.test(r.id)||!['sha256','licenseHash'].every(key=>/^[a-f0-9]{64}$/.test(r[key])))throw new DomainError('invalid_backup','Managed source lacks exact source/license identities');
+  return {id:r.id,sourceHash:r.sha256,licenseHash:r.licenseHash};
+ });
+ const tools=records.products.filter(p=>p.kind==='internal-tool'&&(p.adoption||p.adoptionHistory?.length)).map(p=>{
+  const identities=[...new Set<string>([p.adoption,...(p.adoptionHistory??[])].filter(Boolean).map(a=>a.identity))].sort();
+  if(!/^[a-zA-Z0-9-]+$/.test(p.id)||identities.some(id=>!/^[a-f0-9]{40,64}$/.test(id)))throw new DomainError('invalid_backup','Adopted tool lacks immutable source identities');
+  return {productId:p.id,identities,bundle:`repositories/${p.id}.bundle`,main:p.adoption?.identity??identities[0]};
+ });
+ return {skills:skills.sort((a,b)=>a.id.localeCompare(b.id)),tools:tools.sort((a,b)=>a.productId.localeCompare(b.productId))};
+}
+function validateSkillAssets(root:string,assets:ManagedAssets){
+ for(const source of assets.skills){
+  const directory=ownedPath(root,`skills/vendor/${source.id}`);
+  const sourcePath=ownedPath(root,`skills/vendor/${source.id}/SOURCE.md`),licensePath=ownedPath(root,`skills/vendor/${source.id}/LICENSE`),manifestPath=ownedPath(root,`skills/vendor/${source.id}/manifest.json`);
+  if(![sourcePath,licensePath,manifestPath].every(file=>existsSync(file)&&lstatSync(file).isFile()))throw new DomainError('invalid_backup',`Managed source files are missing: ${source.id}`);
+  const manifest=JSON.parse(readFileSync(manifestPath,'utf8'));
+  if(digest(readFileSync(sourcePath))!==source.sourceHash||digest(readFileSync(licensePath))!==source.licenseHash||manifest.id!==source.id||manifest.sha256!==source.sourceHash||manifest.licenseHash!==source.licenseHash)throw new DomainError('invalid_backup',`Managed source/license identity mismatch: ${directory}`);
+ }
+}
 
 export class KnowledgeVault {
   readonly root: string;
@@ -150,8 +195,23 @@ export class KnowledgeVault {
     this.store.db.exec(`VACUUM INTO '${join(path,'company.sqlite').replaceAll("'","''")}'`);
     copyTree(this.root,join(path,'vault'));
     if (existsSync(join(this.store.dataRoot,'vault-history'))) copyTree(join(this.store.dataRoot,'vault-history'),join(path,'vault-history'));
+    const records=Object.fromEntries(TABLES.map(table=>[table,this.store.list(table)])),managedAssets=expectedAssets(records);
+    validateSkillAssets(this.store.dataRoot,managedAssets);
+    for(const source of managedAssets.skills){const relativeDirectory=`skills/vendor/${source.id}`,sourceDirectory=ownedPath(this.store.dataRoot,relativeDirectory),destination=join(path,relativeDirectory);mkdirSync(destination,{recursive:true,mode:0o700});for(const name of ['SOURCE.md','LICENSE','manifest.json'])copyFileSync(join(sourceDirectory,name),join(destination,name));}
+    const staging=join(path,'.bundle-staging');
+    try{
+      for(const tool of managedAssets.tools){
+        const product=this.store.need('products',tool.productId),repository=ownedPath(this.store.dataRoot,`repositories/${tool.productId}.git`);
+        if(product.repository!==repository||!existsSync(repository))throw new DomainError('invalid_backup','Adopted internal tool repository is missing or outside its owned location');
+        safeRepository(repository);
+        mkdirSync(staging,{recursive:true,mode:0o700});const isolated=join(staging,`${tool.productId}.git`);git(['init','--bare','--quiet',isolated]);
+        for(const identity of tool.identities)git(['--git-dir',isolated,'fetch','--quiet','--no-tags',repository,`${identity}:refs/heads/retained/${identity}`]);
+        mkdirSync(join(path,'repositories'),{recursive:true,mode:0o700});git(['--git-dir',isolated,'bundle','create',join(path,tool.bundle),'--all']);
+      }
+    }finally{rmSync(staging,{recursive:true,force:true});}
+    validateSkillAssets(path,managedAssets);
     const entries=files(path).map(file=>({path:relative(path,file),hash:digest(readFileSync(file))}));
-    writeFileSync(join(path,'manifest.json'),JSON.stringify({version:1,companyId:this.store.company.id,createdAt:new Date().toISOString(),files:entries},null,2),{mode:0o600});
+    writeFileSync(join(path,'manifest.json'),JSON.stringify({version:2,managedAssets,companyId:this.store.company.id,createdAt:new Date().toISOString(),files:entries},null,2),{mode:0o600});
     this.store.emit('backup.created',{path}); return {path,companyId:this.store.company.id,files:entries.length};
   }
   restore(path: string) {
@@ -159,7 +219,7 @@ export class KnowledgeVault {
     const source=realpathSync(resolve(path)), manifestPath=join(source,'manifest.json');
     if (!existsSync(manifestPath)) throw new DomainError('invalid_backup','Backup manifest is missing');
     const manifest=JSON.parse(readFileSync(manifestPath,'utf8'));
-    if (manifest.version!==1 || !Array.isArray(manifest.files)) throw new DomainError('invalid_backup','Unsupported backup format');
+    if (![1,2].includes(manifest.version) || !Array.isArray(manifest.files)) throw new DomainError('invalid_backup','Unsupported backup format');
     const listed=manifest.files.map((entry:any)=>entry.path).sort(),actual=files(source).map(file=>relative(source,file)).filter(file=>file!=='manifest.json').sort();
     if(JSON.stringify(listed)!==JSON.stringify(actual)||!listed.includes('company.sqlite'))throw new DomainError('invalid_backup','Backup manifest must cover every retained file exactly once.');
     if(manifest.companyId!==this.store.company.id)throw new DomainError('invalid_backup','Restore must belong to this company; use an explicit isolated data directory for a different company.');
@@ -174,8 +234,38 @@ export class KnowledgeVault {
     const records=Object.fromEntries(TABLES.map(table=>[table,(sourceDb.prepare(`SELECT data FROM ${table}`).all() as {data:string}[]).map(row=>JSON.parse(row.data))]));
     sourceDb.close();
     if (records.company.length!==1||records.policy.length!==1||records.company[0].id!==manifest.companyId) throw new DomainError('invalid_backup','Backup does not contain one consistent company');
+    const managedAssets=expectedAssets(records);
+    if(managedAssets.skills.length||managedAssets.tools.length){if(manifest.version!==2||JSON.stringify(manifest.managedAssets)!==JSON.stringify(managedAssets))throw new DomainError('invalid_backup','Backup must retain every referenced source and adopted tool version');}
+    if(managedAssets.tools.some(tool=>!listed.includes(tool.bundle)))throw new DomainError('invalid_backup','Backup is missing a referenced adopted tool bundle');
+    validateSkillAssets(source,managedAssets);
+    // Additive restoration never replaces newer immutable sources, history, or repository refs.
+    // Compare against final owned paths, not a temporary destination.
+    for(const skill of managedAssets.skills)for(const name of ['SOURCE.md','LICENSE','manifest.json']){
+      const relativeFile=`skills/vendor/${skill.id}/${name}`,target=ownedPath(this.store.dataRoot,relativeFile),input=join(source,relativeFile);
+      if(existsSync(target)&&(!lstatSync(target).isFile()||digest(readFileSync(target))!==digest(readFileSync(input))))throw new DomainError('restore_asset_conflict',`Retained managed file differs; preserve before restore: ${target}`,409);
+    }
+    if(existsSync(join(source,'vault-history')))additiveFiles(join(source,'vault-history'),this.store.dataRoot,false,'vault-history');
     const transactionId=randomUUID(),journal=join(this.store.dataRoot,'restore-intent.json');
     const staging=join(this.store.dataRoot,`vault-restore-${transactionId}`), previous=join(this.store.dataRoot,`vault-before-restore-${transactionId}`);
+    const repositoryStaging=join(this.store.dataRoot,`repositories-restore-${transactionId}`);
+    try{
+      for(const tool of managedAssets.tools){
+        const repository=ownedPath(this.store.dataRoot,`repositories/${tool.productId}.git`),isolated=join(repositoryStaging,`${tool.productId}.git`);
+        mkdirSync(repositoryStaging,{recursive:true,mode:0o700});git(['init','--bare','--quiet',isolated]);
+        git(['--git-dir',isolated,'fetch','--quiet','--no-tags',join(source,tool.bundle),'+refs/heads/retained/*:refs/heads/retained/*']);
+        for(const identity of tool.identities)git(['--git-dir',isolated,'cat-file','-e',`${identity}^{commit}`]);
+        if(existsSync(repository))safeRepository(repository);
+        if(existsSync(repository)&&git(['--git-dir',repository,'rev-parse','--is-bare-repository'])!=='true')throw new DomainError('restore_asset_conflict','Owned internal tool location is not a bare repository');
+      }
+      for(const tool of managedAssets.tools){
+        const repository=ownedPath(this.store.dataRoot,`repositories/${tool.productId}.git`);if(!existsSync(repository)){mkdirSync(dirname(repository),{recursive:true,mode:0o700});git(['init','--bare','--quiet',repository]);}
+        git(['--git-dir',repository,'fetch','--quiet','--no-tags',join(repositoryStaging,`${tool.productId}.git`),`refs/heads/retained/*:refs/opencorp-restore/${transactionId}/*`]);
+        const refs=git(['--git-dir',repository,'for-each-ref','--format=%(refname)','refs/heads/main']);if(!refs)git(['--git-dir',repository,'update-ref','refs/heads/main',tool.main,'']);
+        const product=records.products.find(p=>p.id===tool.productId)!;product.repository=repository;if(product.binding)product.binding={...product.binding,repository,mirror:repository};
+      }
+      for(const skill of managedAssets.skills){const relativeDirectory=`skills/vendor/${skill.id}`;additiveFiles(join(source,relativeDirectory),this.store.dataRoot,true,relativeDirectory);records.experiences.find(r=>r.id===skill.id)!.sourcePath=join(this.store.dataRoot,relativeDirectory,'SOURCE.md');}
+      if(existsSync(join(source,'vault-history')))additiveFiles(join(source,'vault-history'),this.store.dataRoot,true,'vault-history');
+    }finally{rmSync(repositoryStaging,{recursive:true,force:true});}
     copyTree(join(source,'vault'),staging);
     writeFileSync(journal,JSON.stringify({id:transactionId,source,createdAt:new Date().toISOString()}),{mode:0o600,flush:true});
     try {

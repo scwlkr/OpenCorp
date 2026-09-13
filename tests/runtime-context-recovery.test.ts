@@ -88,16 +88,16 @@ describe('pinned native context overflow recovery', () => {
     expect(f.session.status).not.toHaveBeenCalled(); expect(f.retained).toEqual([]);
   });
 
-  it.each(['cancel', 'hard deadline', 'request budget', 'authority superseded'])('preserves %s during busy native recovery', async cause => {
+  it.each(['signal abort', 'control check rejection'])('preserves %s during busy native recovery', async cause => {
     const f = fixture(), failure = new Error(cause);
     let observed = false;
     f.session.status.mockImplementation(async () => {
       observed = true;
-      if (cause === 'cancel' || cause === 'hard deadline') f.controller.abort(failure);
+      if (cause === 'signal abort') f.controller.abort(failure);
       return { data: { bound: { type: 'busy' } }, response: { ok: true } };
     });
     await expect(completeSession({ ...f.options, check: () => {
-      if (observed && (cause === 'request budget' || cause === 'authority superseded')) throw failure;
+      if (observed && cause === 'control check rejection') throw failure;
     } })).rejects.toThrow(cause);
     expect(f.retained).toEqual([]); expect(f.session.promptAsync).toHaveBeenCalledOnce();
   });

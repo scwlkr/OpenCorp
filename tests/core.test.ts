@@ -31,6 +31,20 @@ function actor(employeeId=ceo().id,kind='management',projectId: string|null=null
 function project() { return store.command(owner,{type:'project.create',name:'Useful project',productId:store.list('products')[0].id,outcome:'Fix observed user friction',acceptance:['Verifier passes'],supervisorId:ceo().id,rationale:'Live repository assessment'}); }
 
 describe('persistent company authority',()=>{
+  it('records validated role authorship runs, ignores supplied run IDs, and preserves previous versions',()=>{
+    const worker=staff(), auth=actor(), prior=store.list('roleVersions').filter(role=>role.employeeId===worker.id);
+    const command={type:'role.update',employeeId:worker.id,content:'Perform the assigned engineering role.',source:'Pinned source inspected by management',rationale:'Adapt the role to actual responsibilities',runId:'forged-caller-run'};
+    const updated=store.command(auth,command);
+    expect(updated).toMatchObject({authorId:auth.employeeId,runId:auth.runId,version:2});
+    const ownerUpdate=store.command(owner,{...command,content:'Updated Owner role instructions.'});
+    expect(ownerUpdate).toMatchObject({authorId:'owner',runId:null,version:3});
+    expect(store.list('roleVersions').filter(role=>role.employeeId===worker.id&&role.version===1)).toEqual(prior);
+    expect(store.need('roleVersions',updated.id)).toEqual(updated);
+    const count=store.list('roleVersions').length;
+    expect(()=>store.command({...auth,runId:'forged-actor-run'},command)).toThrow();
+    expect(store.list('roleVersions')).toHaveLength(count);
+  });
+
   it('creates one company, three Elders, CEO and products once; persists stopped state',()=>{
     const before=store.snapshot();store.command(owner,{type:'control',action:'stop'});store.close();store=new CompanyStore(root);store.bootstrap();
     expect(store.company.state).toBe('stopped');expect(store.list('employees').map(e=>e.id)).toEqual(before.employees.map(e=>e.id));expect(store.list('products')).toHaveLength(3);expect(store.list('appointments')).toHaveLength(4);expect(store.db.pragma('journal_mode',{simple:true})).toBe('wal');
@@ -177,4 +191,218 @@ describe('durable claims and external effects',()=>{
     store.command(owner,{type:'action.approveCost',actionId:pending.id,amount:5,description:'One described build only'});
     expect(store.need('actions',pending.id).status).toBe('prepared');expect(store.list('attention').filter(a=>a.actionId===pending.id).every(a=>a.status==='resolved')).toBe(true);expect(store.policy.spendingLimit).toBe(0);
   });
+});
+
+describe('pending executive appointment occupancy preview',()=>{
+ it('shows the actual occupied-position constraint to an unvoted Elder without changing governance',()=>{
+  const incumbent=ceo(),candidate=staff('Qualified candidate');
+  const decision=store.command(actor(),{type:'decision.create',kind:'executive.appoint',subject:'Proposed appointment',rationale:'Consider candidate identity',payload:{positionId:incumbent.positionId,employeeId:candidate.id}});
+  const elder=store.list('employees').find(e=>store.level(e.id)==='elder')!,reader=actor(elder.id,'governance',null,{decisionId:decision.id}),before=store.need('decisions',decision.id);
+  const effect=store.snapshot(reader).decisions.find(d=>d.id===decision.id)!.appointmentEffect;
+  expect(effect).toMatchObject({candidateKind:'existing_employee',candidateEmployeeId:candidate.id,targetOccupant:{employeeId:incumbent.id,name:incumbent.name,positionId:incumbent.positionId},occupiedPosition:true});
+  expect(effect.summary).toContain('occupied_position');expect(effect.summary).toContain('executive.replace');expect(effect.summary).toContain(incumbent.id);expect(effect.summary).toContain('preserving that employee ID');
+  expect(store.need('decisions',decision.id)).toEqual(before);expect(store.list('votes')).toHaveLength(0);expect(store.need('employees',incumbent.id).status).toBe('active');
+ });
+ it.each(['vacant','same candidate','replacement','historical approved'])('does not report an appointment conflict for %s',scenario=>{
+  const incumbent=ceo(),candidate=scenario==='same candidate'?incumbent:staff('Another candidate');
+  const target=scenario==='vacant'?store.command(actor(),{type:'position.create',title:'Vacant office',level:'executive',responsibilities:'Own a domain'}):store.need('positions',incumbent.positionId);
+  const decision=store.command(actor(),{type:'decision.create',kind:scenario==='replacement'?'executive.replace':'executive.appoint',subject:'Candidate proposal',rationale:'Actual target semantics',payload:{positionId:target.id,employeeId:candidate.id}});
+  if(scenario==='historical approved')store.update('decisions',decision.id,{status:'approved'});
+  const effect=store.snapshot().decisions.find(d=>d.id===decision.id)!.appointmentEffect;
+  expect(effect.occupiedPosition).toBe(false);expect(effect.summary).not.toContain('occupied_position');
+  if(scenario==='vacant'||scenario==='historical approved')expect(effect.targetOccupant).toBeNull();else expect(effect.targetOccupant.employeeId).toBe(incumbent.id);
+  if(scenario==='replacement')expect(effect.summary).toContain('would be dismissed');
+ });
+});
+
+
+it('blinded appointment preview does not reveal the retained decision status through occupancy',()=>{
+ const incumbent=ceo(),candidate=staff('Independent candidate');
+ const decision=store.command(actor(),{type:'decision.create',kind:'executive.appoint',subject:'Assess candidate',rationale:'Assess actual remit',payload:{positionId:incumbent.positionId,employeeId:candidate.id}});
+ const elder=store.list('employees').find(e=>store.level(e.id)==='elder')!,reader=actor(elder.id,'governance',null,{decisionId:decision.id});
+ const pending=store.snapshot(reader).decisions.find(d=>d.id===decision.id)!;
+ for(const status of ['approved','rejected']){
+  store.update('decisions',decision.id,{status});
+  const blinded=store.snapshot(reader).decisions.find(d=>d.id===decision.id)!;
+  expect(blinded.status).toBe('awaiting_your_independent_vote');expect(blinded.appointmentEffect).toEqual(pending.appointmentEffect);
+  const ownerView=store.snapshot().decisions.find(d=>d.id===decision.id)!.appointmentEffect;
+  expect(ownerView.occupiedPosition).toBe(false);expect(ownerView.targetOccupant).toBeNull();
+ }
+});
+
+describe('independent judgment survives expected governance application failures',()=>{
+ function proposal(kind='executive.appoint',payload:Record<string,unknown>={}){
+  return store.command(actor(),{type:'decision.create',kind,subject:'Actual governance proposal',rationale:'Independent assessment required',payload:{positionId:ceo().positionId,name:'New candidate',modelId:model,...payload}});
+ }
+ function voteAll(decisionId:string){
+  return store.list('employees').filter(e=>store.level(e.id)==='elder').map(elder=>{
+   const voter=actor(elder.id,'governance',null,{decisionId});
+   return {voter,vote:store.command(voter,{type:'decision.vote',decisionId,approve:true,rationale:`Independent approval by ${elder.id}`})};
+  });
+ }
+ it('retains the third vote and real majority when an occupied appointment cannot apply',()=>{
+  const incumbent=ceo(),decision=proposal(),before=store.list('employees');
+  const votes=voteAll(decision.id),retained=store.need('decisions',decision.id);
+  expect(retained).toMatchObject({status:'approved',result:{approve:3,reject:0},application:{status:'blocked',code:'occupied_position'},payload:decision.payload});
+  expect(store.list('votes')).toHaveLength(3);expect(store.list('employees')).toEqual(before);expect(store.need('employees',incumbent.id).status).toBe('active');
+  expect(store.need('assignments',store.need('runs',votes[2].voter.runId).assignmentId).status).toBe('completed');
+  expect(store.snapshot().decisions.find(d=>d.id===decision.id)!.appointmentEffect.summary).toContain('application is blocked');
+  expect(()=>store.command(votes[2].voter,{type:'decision.vote',decisionId:decision.id,approve:false,rationale:'Cannot rewrite judgment'})).toThrow(/pending/);
+ });
+ it('rolls back a partial replacement dismissal, revocations and staffing records while retaining judgments',()=>{
+  const incumbent=ceo(),child=staff('Existing direct report'),incumbentRun=actor(),decision=proposal('executive.replace',{employeeId:incumbent.id});
+  const before={employees:store.list('employees'),appointments:store.list('appointments'),attention:store.list('attention'),run:store.need('runs',incumbentRun.runId),assignment:store.need('assignments',store.need('runs',incumbentRun.runId).assignmentId)};
+  voteAll(decision.id);expect(store.need('decisions',decision.id)).toMatchObject({status:'approved',application:{status:'blocked',code:'inactive_employee'}});
+  expect(store.list('employees')).toEqual(before.employees);expect(store.list('appointments')).toEqual(before.appointments);expect(store.list('attention')).toEqual(before.attention);expect(store.need('runs',incumbentRun.runId)).toEqual(before.run);expect(store.need('assignments',before.assignment.id)).toEqual(before.assignment);expect(store.need('employees',child.id).homeManagerId).toBe(incumbent.id);expect(store.list('votes')).toHaveLength(3);
+ });
+ it('records failed Owner approval explicitly and permits only an explicit retry or withdrawal',()=>{
+  const decision=proposal();const first=store.command(owner,{type:'decision.override',decisionId:decision.id,approve:true,rationale:'Owner explicitly approves original candidate'});
+  expect(first).toMatchObject({status:'approved',application:{status:'blocked',code:'occupied_position'}});expect(store.list('votes')).toHaveLength(0);
+  const reader=actor(store.list('employees').find(e=>store.level(e.id)==='elder')!.id,'governance',null,{decisionId:decision.id}),blinded=store.snapshot(reader).decisions.find(d=>d.id===decision.id)!;
+  for(const key of ['application','applicationHistory','override','overrideHistory'])expect(blinded[key]).toBeUndefined();expect(blinded.appointmentEffect.summary).not.toContain('Governance approved');
+  store.command(owner,{type:'decision.override',decisionId:decision.id,approve:true,rationale:'Explicit retry of exact original operation'});
+  expect(store.need('decisions',decision.id).applicationHistory).toHaveLength(2);expect(store.need('decisions',decision.id).payload).toEqual(decision.payload);
+  store.command(owner,{type:'decision.override',decisionId:decision.id,approve:false,rationale:'Withdraw the unapplied operation'});
+  expect(store.need('decisions',decision.id)).toMatchObject({status:'rejected',application:{status:'cancelled'}});expect(store.need('decisions',decision.id).overrideHistory).toHaveLength(3);expect(store.list('votes')).toHaveLength(0);
+ });
+ it('explicit Owner retry can apply the unchanged approved payload after its prerequisite is repaired',()=>{
+  const position=store.command(actor(),{type:'position.create',title:'New executive office',level:'executive',responsibilities:'Own a specific domain'});
+  const decision=proposal('executive.appoint',{positionId:position.id,modelId:'missing-local-model'});
+  store.command(owner,{type:'decision.override',decisionId:decision.id,approve:true,rationale:'Explicit approval of this operation'});
+  expect(store.need('decisions',decision.id).application.status).toBe('blocked');
+  store.put('models',{name:'missing-local-model',artifactIdentity:'fixture-model',local:true,available:true,capabilities:['tools']});
+  expect(store.list('employees').some(e=>e.positionId===position.id)).toBe(false);
+  store.command(owner,{type:'decision.override',decisionId:decision.id,approve:true,rationale:'Prerequisite repaired; explicitly retry this same operation'});
+  expect(store.need('decisions',decision.id)).toMatchObject({status:'approved',application:{status:'applied'},payload:decision.payload});expect(store.need('decisions',decision.id).applicationHistory).toHaveLength(2);
+  expect(store.list('employees').filter(e=>e.positionId===position.id)).toHaveLength(1);
+  expect(()=>store.command(owner,{type:'decision.override',decisionId:decision.id,approve:true,rationale:'No duplicate application'})).toThrow(/already been applied/);
+ });
+ it('unexpected application failures still propagate and roll back the current transaction',()=>{
+  const decision=proposal();const application=(store as any).applyGovernance;(store as any).applyGovernance=()=>{throw new Error('Unexpected runtime defect');};
+  const elders=store.list('employees').filter(e=>store.level(e.id)==='elder');
+  for(const elder of elders.slice(0,2))store.command(actor(elder.id,'governance'),{type:'decision.vote',decisionId:decision.id,approve:true,rationale:'Independent judgment'});
+  expect(()=>store.command(actor(elders[2].id,'governance'),{type:'decision.vote',decisionId:decision.id,approve:true,rationale:'Third judgment'})).toThrow('Unexpected runtime defect');
+  expect(store.list('votes')).toHaveLength(2);expect(store.need('decisions',decision.id).status).toBe('pending');(store as any).applyGovernance=application;
+ });
+});
+
+
+it.each(['executive.appoint','executive.replace'])('previews the current CEO self-reporting constraint for %s without changing the candidate',kind=>{
+ const incumbent=ceo(),position=store.command(actor(),{type:'position.create',title:'Chief Product Officer',level:'executive',responsibilities:'Own product direction'});
+ const decision=store.command(actor(),{type:'decision.create',kind,subject:'Proposed CEO transfer',rationale:'Actual submitted candidate',payload:{positionId:position.id,employeeId:incumbent.id}});
+ const elder=store.list('employees').find(e=>store.level(e.id)==='elder')!,reader=actor(elder.id,'governance',null,{decisionId:decision.id}),effect=store.snapshot(reader).decisions.find(d=>d.id===decision.id)!.appointmentEffect;
+ expect(effect.managementCycle).toBe(true);expect(effect.summary).toContain('management_cycle');expect(effect.summary).toContain('report to themself');expect(effect.summary).toContain(incumbent.id);expect(effect.candidateEmployeeId).toBe(incumbent.id);
+ expect(store.need('decisions',decision.id)).toEqual(decision);expect(store.need('employees',incumbent.id)).toEqual(incumbent);expect(store.list('votes')).toHaveLength(0);
+});
+
+it('keeps productive concurrency at one unless Owner records exact two-task qualification',()=>{
+  const mixed={passed:true,stableMaxInference:2,largePlusSmall:true,evidence:'Retained mixed trial'};
+  store.command(owner,{type:'policy.update',maxInference:2,concurrencyQualification:mixed});
+  expect(store.policy.maxProductiveTurns??1).toBe(1);
+  expect(()=>store.command(owner,{type:'policy.update',maxProductiveTurns:2})).toThrow('pinned evidence');
+  const qualification={passed:true,artifactIdentity:'a'.repeat(64),evidence:'Retained real two-task trial'};
+  const auth=actor();
+  expect(()=>store.command(auth,{type:'policy.update',maxProductiveTurns:2,productiveConcurrencyQualification:qualification})).toThrow('Owner');
+  expect(()=>store.command(owner,{type:'policy.update',maxProductiveTurns:2,productiveConcurrencyQualification:{...qualification,artifactIdentity:'alias'}})).toThrow('exact productive artifact');
+  store.command(owner,{type:'policy.update',maxProductiveTurns:2,productiveConcurrencyQualification:qualification});
+  expect(store.policy.maxProductiveTurns).toBe(2);
+  expect(store.policy.productiveConcurrencyQualification).toMatchObject(qualification);
+  store.command(owner,{type:'policy.update',maxProductiveTurns:1});
+  expect(store.policy.maxProductiveTurns).toBe(1);
+});
+
+
+it('applies durable productive limits to small models as well as large models',()=>{
+ const identity='a'.repeat(64);
+ for(const installed of store.list('models'))store.update('models',installed.id,{sizeClass:'small',size:1e9,artifactIdentity:installed.name===model?identity:'b'.repeat(64)});
+ store.update('policy',store.policy.id,{maxInference:3});
+ const one=staff('First'),two=staff('Second'),three=staff('Third');
+ const first=assignment(one.id),second=assignment(two.id),third=assignment(three.id);
+ expect(store.claimNext({assignmentId:first.id})).toBeTruthy();
+ expect(store.claimNext({assignmentId:second.id})).toBeUndefined();
+ store.update('policy',store.policy.id,{maxProductiveTurns:2,productiveConcurrencyQualification:{passed:true,artifactIdentity:identity,evidence:'Observed two-task qualification'}});
+ store.update('employees',two.id,{modelId:alternative});
+ expect(store.claimNext({assignmentId:second.id})).toBeUndefined();
+ store.update('employees',two.id,{modelId:model});
+ expect(store.claimNext({assignmentId:second.id})).toBeTruthy();
+ expect(store.claimNext({assignmentId:third.id})).toBeUndefined();
+});
+
+describe('Owner-scoped free OpenRouter exception',()=>{
+ const id='vendor/verified-model:free';
+ const metadata=()=>({id,name:id,alias:id,sourceAlias:id,provider:'openrouter',local:false,available:true,freeOnly:true,artifactIdentity:'a'.repeat(64),endpoint:'https://openrouter.ai/api/v1/chat/completions',pricingVerifiedAt:new Date().toISOString(),pricing:{prompt:'0',completion:'0',request:'0'},capabilities:['tools'],size:0,sizeClass:'remote'});
+ it('requires explicit Owner amendment, retains local defaults, and revokes future claims',()=>{
+  store.put('models',metadata());
+  expect(()=>store.command(owner,{type:'employee.model',employeeId:ceo().id,modelId:id,rationale:'Use free model'})).toThrow();
+  const auth=actor();expect(()=>store.command(auth,{type:'policy.update',openRouterFreeModels:[id]})).toThrow('Owner');
+  store.update('runs',auth.runId,{status:'succeeded'});
+  store.command(owner,{type:'policy.update',openRouterFreeModels:[id]});
+  expect(store.policy.localOnly).toBe(true);expect(store.policy.spendingLimit).toBe(0);
+  store.command(owner,{type:'employee.model',employeeId:ceo().id,modelId:id,rationale:'Owner-approved free provider'});
+  const task=assignment();const run=store.claimNext({assignmentId:task.id});expect(run?.modelId).toBe(id);
+  store.update('runs',run!.id,{status:'succeeded'});
+  store.command(owner,{type:'policy.update',openRouterFreeModels:[]});
+  const next=assignment();expect(()=>store.claimNext({assignmentId:next.id})).toThrow();
+  store.command(owner,{type:'employee.model',employeeId:ceo().id,modelId:model,rationale:'Return to installed local model'});
+ });
+ it('rejects paid IDs, automatic routers and malformed allowlists atomically',()=>{
+  const revision=store.policy.revision;
+  for(const ids of [['vendor/paid'],['vendor/model:online:free'],['openrouter/free'],['https://other.invalid/x:free'],[id,id],null])expect(()=>store.command(owner,{type:'policy.update',openRouterFreeModels:ids})).toThrow('exact vendor/model:free');
+  expect(store.policy.revision).toBe(revision);
+ });
+ it('rejects unverified, other-host or nonzero metadata despite an allowed ID',()=>{
+  store.command(owner,{type:'policy.update',openRouterFreeModels:[id]});
+  for(const patch of [{pricing:{prompt:'0x0',completion:'0'}},{pricing:{prompt:'0',completion:'0.01'}},{pricing:{prompt:'0',completion:'0',request:'1'}},{pricing:{}},{pricingVerifiedAt:'invalid'},{freeOnly:false},{endpoint:'https://other.invalid/api/v1/chat/completions'},{provider:'other'},{artifactIdentity:'unverified'}]){
+   store.put('models',{...metadata(),...patch});
+   expect(()=>store.command(owner,{type:'employee.model',employeeId:ceo().id,modelId:id,rationale:'Attempt invalid metadata'})).toThrow();
+  }
+  expect(ceo().modelId).toBe(model);
+ });
+});
+
+it('requires Owner exact direct-free exception and fresh metadata while preserving default limits',()=>{
+ const id='groq:fixture-model',metadata={id,name:id,alias:id,sourceAlias:id,provider:'groq',local:false,available:true,freeOnly:true,artifactIdentity:'a'.repeat(64),endpoint:'https://api.groq.com/openai/v1/chat/completions',tierVerification:'owner-tier-audit',tierVerifiedAt:new Date(Date.now()-1000).toISOString(),tierExpiresAt:new Date(Date.now()+60000).toISOString(),capabilities:['tools'],size:0,sizeClass:'remote'};
+ store.put('models',metadata);
+ expect(()=>store.command(owner,{type:'employee.model',employeeId:ceo().id,modelId:id,rationale:'Try direct model'})).toThrow();
+ const auth=actor();expect(()=>store.command(auth,{type:'policy.update',directFreeModels:[id]})).toThrow('Owner');store.update('runs',auth.runId,{status:'succeeded'});
+ for(const ids of [['https://paid.invalid/model'],['other:model'],[id,id]])expect(()=>store.command(owner,{type:'policy.update',directFreeModels:ids})).toThrow();
+ store.command(owner,{type:'policy.update',directFreeModels:[id]});expect(store.policy.localOnly).toBe(true);expect(store.policy.spendingLimit).toBe(0);
+ for(const patch of [{endpoint:'https://other.invalid'},{freeOnly:false},{tierExpiresAt:new Date(Date.now()-1).toISOString()},{tierVerification:'live-billing-guess'}]){store.put('models',{...metadata,...patch});expect(()=>store.command(owner,{type:'employee.model',employeeId:ceo().id,modelId:id,rationale:'Unverified direct model'})).toThrow();}
+ store.put('models',metadata);store.command(owner,{type:'employee.model',employeeId:ceo().id,modelId:id,rationale:'Owner audited synthetic model'});expect(ceo().modelId).toBe(id);
+ store.command(owner,{type:'policy.update',directFreeModels:[]});expect(()=>store.command(owner,{type:'employee.model',employeeId:ceo().id,modelId:id,rationale:'Revoked model'})).toThrow();
+});
+
+it.each([false,true])('admits only the qualified opposite productive backend, remote first=%s',remoteFirst=>{
+ const localHash='a'.repeat(64),remoteHash='b'.repeat(64),remoteId='vendor/mixed:free';
+ store.update('models',store.list('models').find(m=>m.name===model)!.id,{artifactIdentity:localHash,size:18*1024**3});
+ store.put('models',{id:remoteId,name:remoteId,provider:'openrouter',local:false,available:true,freeOnly:true,size:0,artifactIdentity:remoteHash,endpoint:'https://openrouter.ai/api/v1/chat/completions',pricingVerifiedAt:new Date().toISOString(),pricing:{prompt:'0',completion:'0'}});
+ store.command(owner,{type:'policy.update',openRouterFreeModels:[remoteId],maxInference:3,concurrencyQualification:{passed:true,stableMaxInference:3,largePlusSmall:true,evidence:'Synthetic admission test'},maxProductiveTurns:2,productiveConcurrencyQualification:{mode:'local-remote',passed:true,artifactIdentity:localHash,remoteModelId:remoteId,remoteArtifactIdentity:remoteHash,evidence:'Synthetic exact pair receipt'}});
+ const local=staff('Local employee'),remote=staff('Remote employee'),other=staff('Other local employee');
+ store.command(owner,{type:'employee.model',employeeId:remote.id,modelId:remoteId,rationale:'Qualified fixture'});
+ const localTask=assignment(local.id),remoteTask=assignment(remote.id),otherTask=assignment(other.id);
+ const first=store.claimNext({assignmentId:remoteFirst?remoteTask.id:localTask.id})!;expect(first).toBeDefined();
+ store.command(owner,{type:'employee.model',employeeId:other.id,modelId:remoteFirst?remoteId:model,rationale:'Same-side fixture'});
+ expect(store.claimNext({assignmentId:otherTask.id})).toBeUndefined();
+ const secondId=remoteFirst?localTask.id:remoteTask.id;
+ const selected=remoteFirst?store.list('models').find(m=>m.name===model)!:store.need('models',remoteId);
+ store.update('models',selected.id,{artifactIdentity:'c'.repeat(64)});expect(store.claimNext({assignmentId:secondId})).toBeUndefined();
+ store.update('models',selected.id,{artifactIdentity:remoteFirst?localHash:remoteHash});
+ expect(store.claimNext({assignmentId:secondId})).toBeDefined();expect(store.claimNext({assignmentId:otherTask.id})).toBeUndefined();
+ expect(store.policy.maxProductiveTurns).toBe(2);
+});
+it('requires explicit mixed pins and keeps qualification metadata through a safe reduction to one',()=>{
+ const q={mode:'local-remote',passed:true,artifactIdentity:'a'.repeat(64),remoteModelId:'gemini:fixture',remoteArtifactIdentity:'b'.repeat(64),evidence:'Synthetic qualification'};
+ for(const patch of [{remoteModelId:'paid/model'},{remoteArtifactIdentity:'alias'},{mode:'unknown'},{mode:undefined}])expect(()=>store.command(owner,{type:'policy.update',productiveConcurrencyQualification:{...q,...patch}})).toThrow();
+ store.command(owner,{type:'policy.update',productiveConcurrencyQualification:q});expect(store.policy.maxProductiveTurns??1).toBe(1);expect(store.policy.productiveConcurrencyQualification).toMatchObject(q);
+});
+
+it('requires measured five-worker evidence and enforces exact profile and aggregate provider caps in durable claims',()=>{
+ const localHash='a'.repeat(64),remoteHash='b'.repeat(64),remoteId='vendor/five:free';store.update('models',store.list('models').find(m=>m.name===model)!.id,{artifactIdentity:localHash,size:18*1024**3});
+ store.put('models',{id:remoteId,name:remoteId,provider:'openrouter',local:false,available:true,freeOnly:true,size:0,artifactIdentity:remoteHash,endpoint:'https://openrouter.ai/api/v1/chat/completions',pricingVerifiedAt:new Date().toISOString(),pricing:{prompt:'0',completion:'0'}});
+ const q={mode:'local-remotes',passed:true,artifactIdentity:localHash,stableMaxProductiveTurns:5,remoteProfiles:[{modelId:remoteId,artifactIdentity:remoteHash,maxConcurrentTurns:4}],providerCaps:[{provider:'openrouter',maxConcurrentTurns:4}],evidence:'Synthetic five-worker test only'};
+ const policy={type:'policy.update',openRouterFreeModels:[remoteId],maxInference:5,concurrencyQualification:{passed:true,stableMaxInference:5,largePlusSmall:true,evidence:'Synthetic fixture'},maxProductiveTurns:5,productiveConcurrencyQualification:q};
+ for(const change of [{stableMaxProductiveTurns:2},{providerCaps:[{provider:'openrouter',maxConcurrentTurns:1}]},{remoteProfiles:[{...q.remoteProfiles[0],modelId:'paid/model'}]},{providerCaps:[]},{providerCaps:[{provider:'groq',maxConcurrentTurns:4}]}])expect(()=>store.command(owner,{...policy,productiveConcurrencyQualification:{...q,...change}})).toThrow();
+ store.command(owner,policy);const local=staff('Local five'),local2=staff('Another local five');expect(store.claimNext({assignmentId:assignment(local.id).id})).toBeDefined();expect(store.claimNext({assignmentId:assignment(local2.id).id})).toBeUndefined();
+ for(let i=0;i<5;i++){const remote=staff('Remote five '+i);store.command(owner,{type:'employee.model',employeeId:remote.id,modelId:remoteId,rationale:'Synthetic fixture'});const claim=store.claimNext({assignmentId:assignment(remote.id).id});if(i<4)expect(claim).toBeDefined();else expect(claim).toBeUndefined();}
+ expect(store.list('runs').filter(r=>r.status==='running')).toHaveLength(5);
 });

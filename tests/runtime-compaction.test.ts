@@ -109,3 +109,9 @@ describe('pinned OpenCode compaction compatibility', () => {
     expect(upstreamOverflow(config(32768), 12749)).toBe(false);
   });
 });
+
+it('reports the trusted provision response cap without changing ordinary output or compaction reserve',()=>{
+ const model={id:'fixture',alias:'fixture',provider:'ollama',local:true,contextTokens:32768,capabilities:['tools']} as LocalModel;
+ for(const provisionOnly of [false,true]){const config=runtimeConfig(model,'http://127.0.0.1:1','secret',true,{system:'fixture',workspace:'/unused',corporateOnly:true,provisionOnly});expect(Object.values(config.provider!['opencorp-local'].models!)[0].limit!.output).toBe(provisionOnly?1024:4096);expect(config.compaction!.reserved).toBe(8192);}
+ expect(runtimeCompletion('length',2,undefined,undefined,1024)).toMatchObject({outputLimit:1024,exhausted:true});expect(runtimeCompletion('stop',0).outputLimit).toBe(4096);
+});

@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, request, type IncomingMessage, type ServerResponse } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { RunGateway } from '../src/runtime/gateway.js';
-import { startRunWatchdog } from '../src/runtime/index.js';
+import { ProviderAvailabilityError } from '../src/runtime/resource-budget.js';
+import { PoolUnavailableError, PoolRequestUnsupportedError, PoolContextOverflowError } from '../src/runtime/free-pool/types.js';
+import { OpenRouterCooldownError } from '../src/runtime/openrouter.js';
+import { startRunWatchdog, toolFailureGuard } from '../src/runtime/index.js';
 import { requestLocalInference } from '../src/runtime/inference-http.js';
 import type { OwnedOllama } from '../src/runtime/ollama.js';
 import type { LocalModel, RuntimeEvent } from '../src/runtime/types.js';
 
-const model = { id: 'small', alias: 'opencorp-small-fixture', contextTokens: 16384, artifactIdentity: 'fixture' } as LocalModel;
+const model = { provider: 'ollama', local: true, id: 'small', alias: 'opencorp-small-fixture', contextTokens: 16384, artifactIdentity: 'fixture' } as LocalModel;
 const complete = 'data: {"choices":[{"finish_reason":"tool_calls","delta":{"tool_calls":[{"function":{"name":"write","arguments":"{\\"content\\":\\"buffered fixture\\"}"}}]}}],"usage":{"prompt_tokens":20,"completion_tokens":10}}\n\ndata: [DONE]\n\n';
 async function body(response: IncomingMessage): Promise<string> {
   let text = ''; for await (const chunk of response) text += chunk.toString(); return text;
@@ -48,6 +51,62 @@ async function fixture(options: { headers?: boolean; verifyIdentity?: () => Prom
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe('repeated tool failures', () => {
+  it('stops three equivalent failed calls, ignoring repeated native updates and JSON key order', () => {
+    const controller = new AbortController(), observe = toolFailureGuard(controller);
+    const failed = (id: string, input: unknown) => ({id, tool:'corporate_company_command', state:{status:'error',input,error:'Missing rationale'}});
+    observe(failed('first',{type:'assignment.update',status:'queued'}));
+    observe(failed('first',{type:'assignment.update',status:'queued'}));
+    observe(failed('second',{status:'queued',type:'assignment.update'}));
+    expect(controller.signal.aborted).toBe(false);
+    observe(failed('third',{type:'assignment.update',status:'queued'}));
+    expect(controller.signal.reason.message).toContain('same tool failure three times');
+  });
+  it('allows corrected arguments, different failures and successful intervening work', () => {
+    const controller = new AbortController(), observe = toolFailureGuard(controller);
+    const failed = (id: string, input: unknown, error='Missing rationale') => ({id,tool:'corporate_company_command',state:{status:'error',input,error}});
+    observe(failed('first',{})); observe(failed('second',{}));
+    observe(failed('corrected',{rationale:'Actual correction'},'Unchanged approach'));
+    observe(failed('different-error',{rationale:'Actual correction'},'Authority changed'));
+    observe({id:'read',tool:'corporate_company_detail',state:{status:'completed',input:{id:'synthetic'}}});
+    observe(failed('fifth',{})); observe(failed('sixth',{}));
+    expect(controller.signal.aborted).toBe(false);
+  });
+});
+
+describe('provider capacity retry boundaries', () => {
+  it('signals native compaction for recoverable conversation size without retrying unchanged input', async () => {
+    const f=await fixture({verifyIdentity:async()=>{throw new PoolContextOverflowError();}});
+    try { const response=await f.invoke();expect(response.statusCode).toBe(400);expect(response.headers['retry-after']).toBeUndefined();expect(JSON.parse(await body(response)).error.code).toBe('context_length_exceeded');expect(f.gateway.usage.requests).toBe(0); }
+    finally {await f.close();}
+  });
+  it('does not retry a request unsupported by every configured free model', async () => {
+    const f=await fixture({verifyIdentity:async()=>{throw new PoolRequestUnsupportedError();}});
+    try { const response=await f.invoke();expect(response.statusCode).toBe(400);expect(response.headers['retry-after']).toBeUndefined();expect(await body(response)).toContain('revise its context or capabilities');expect(f.gateway.usage.requests).toBe(0); }
+    finally {await f.close();}
+  });
+  it.each(['direct', 'pool', 'openrouter'])('ends impossible %s waits without inference and retains short cooldown retries', async provider => {
+    let retryAt = Math.floor(Date.now() / 1000) * 1000 + 24 * 60 * 60_000 + 500;
+    const f = await fixture({ verifyIdentity: async () => {
+      throw provider === 'pool' ? new PoolUnavailableError(retryAt) : provider === 'openrouter'
+        ? new OpenRouterCooldownError(new Date(retryAt).toISOString())
+        : new ProviderAvailabilityError('gemini', new Date(retryAt).toISOString(), 'Daily reservation budget exhausted');
+    } });
+    try {
+      const long = await f.invoke();
+      expect(long.statusCode).toBe(400); expect(long.headers['retry-after']).toBeUndefined();
+      const failure = await body(long);
+      expect(failure).toContain('capacity unavailable within this turn');
+      // Pinned native retry.ts also treats these bare body digits as retryable.
+      expect(failure).not.toMatch(/429|500|502|503|504|524/);
+      retryAt = Date.now() + 30_000;
+      const short = await f.invoke();
+      expect(short.statusCode).toBe(429); expect(Number(short.headers['retry-after'])).toBeGreaterThan(0);
+      await body(short); expect(f.pending).toHaveLength(0); expect(f.gateway.usage.requests).toBe(0);
+    } finally { await f.close(); }
+  });
+});
 
 describe('the directly used runtime watchdog', () => {
   it('still aborts an actually idle runtime after four minutes and clears both timers', () => {
@@ -233,4 +292,40 @@ describe('signal-owned exact loopback HTTP transport', () => {
       expect(f.pending).toHaveLength(1);
     } finally { await f.close(); }
   });
+});
+
+it.each([complete, 'data: {"choices":[{"delta":{"content":"public fixture"}}]}\n\ndata: [DONE]\n\n'])('emits first public generated content once after bytes, role and reasoning-only chunks (%#)', async output => {
+  const f = await fixture({ headers: true });
+  try {
+    const response = f.invoke(); await until(() => f.pending.length === 1);
+    const upstream = f.pending[0]!;
+    upstream.write('data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n');
+    upstream.write('data: {"choices":[{"delta":{"reasoning_content":"private fixture marker"}}]}\n\n');
+    await until(() => f.events.some(event => event.type === 'runtime.inference.progress'));
+    expect(f.events.filter(event => event.type === 'runtime.inference.first_content')).toHaveLength(0);
+    upstream.end(output);
+    await body(await response);
+    const observed = f.events.find(event => event.type === 'runtime.inference.observed')?.payload as { publicContentSamples: number[]; generatedContentChunks: number };
+    expect(observed.publicContentSamples).toHaveLength(1);
+    expect(observed.generatedContentChunks).toBe(2);
+    const events = f.events.filter(event => event.type === 'runtime.inference.first_content');
+    expect(events).toHaveLength(1);
+    expect(events[0]?.payload).toMatchObject({ modelId: model.id, request: 1 });
+    expect(JSON.stringify(events)).not.toMatch(/private fixture|buffered fixture/);
+  } finally { await f.close(); }
+});
+
+
+it.each(['reasoning', 'reasoning_content'])('counts private %s activity without public content or disclosure on length exhaustion', async field => {
+  const f = await fixture({ headers: true });
+  try {
+    const response = f.invoke(); await until(() => f.pending.length === 1);
+    f.pending[0]!.end(`data: ${JSON.stringify({ choices: [{ delta: { [field]: 'private hidden marker' } }] })}\n\ndata: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\ndata: [DONE]\n\n`);
+    await body(await response);
+    const observed = f.events.find(event => event.type === 'runtime.inference.observed')?.payload;
+    expect(observed).toMatchObject({ generatedContentChunks: 1, publicContentSamples: [], finishReason: 'length' });
+    expect(f.events.filter(event => event.type === 'runtime.inference.first_content')).toHaveLength(0);
+    expect(JSON.stringify(f.events)).not.toContain('private hidden marker');
+    expect(f.pending).toHaveLength(1);
+  } finally { await f.close(); }
 });

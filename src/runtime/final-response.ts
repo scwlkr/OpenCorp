@@ -3,7 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import type { OpencodeClient } from '@opencode-ai/sdk/v2';
 import { RuntimeExecutionError, type FinalResponseReceipt, type RuntimeResult } from './types.js';
 
-export const finalResponseInstruction = 'The scheduler has verified this assignment\'s current-run governance or fault-diagnosis checkpoint. Briefly summarize only the outcome you actually recorded and end this turn. Do not resolve the original blocked work, start other work, or call more tools. Final validation still belongs to the scheduler; this request does not establish any unobserved product, project, merge or release completion.';
+export const finalResponseInstruction = 'The scheduler has verified this assignment\'s assigned corporate-action checkpoint. Briefly summarize only the actual retained outcome of this assignment and end this turn. Do not resolve the original blocked work, start other work, or call more tools. Final validation still belongs to the scheduler; this request does not establish any unobserved product, project, merge or release completion.';
 
 export function assertFinalResponseCheckpoint(checkpoint: () => boolean, result?: RuntimeResult): void {
   try { if (checkpoint()) return; }
