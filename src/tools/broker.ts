@@ -640,7 +640,7 @@ Record the next accountable action with company_command {command:{type:"responsi
      if(actor.kind!=='employee'||!local||record.employeeId!==actor.employeeId&&!this.store.canManage(actor,record.employeeId)||state.decisions.some(d=>d.status==='awaiting_your_independent_vote'))throw new DomainError('inspection_forbidden','Full capture requires local inference and own or home-managed work, after independent initial governance judgment. Use scoped run records otherwise.',403);
      const capture=readInspection(this.dataRoot,record.id),{records,...metadata}=capture;
      if(args.eventIndex!==undefined&&(!Number.isInteger(args.eventIndex)||args.eventIndex<0||args.eventIndex>=records.length))throw new DomainError('inspection_event','Select an eventIndex from the inspection index.',400);
-     const content=args.eventIndex===undefined?records.map((event,index)=>({eventIndex:index,at:event.at,type:event.type})).reverse():records[args.eventIndex];
+     const content=args.eventIndex===undefined?records.map((event,index)=>({eventIndex:index,at:event.at,type:event.type,...(event.payload?.tool?{tool:event.payload.tool,status:event.payload.state?.status}:{})})).reverse():records[args.eventIndex];
      result={record:{id:record.id},...metadata,eventCount:records.length,...(args.eventIndex===undefined?{guidance:'Newest events first. Select eventIndex for captured content; offset pages that event. Read relevant events, not every repeated prompt.'}:{eventIndex:args.eventIndex}),...excerpt(JSON.stringify(content,null,2),Math.max(0,Number(args.offset)||0))};break;
     }
     if(args.view==='verification'){

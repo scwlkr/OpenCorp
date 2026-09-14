@@ -1521,10 +1521,11 @@ it('serves bounded shared inspection to local home management without exposing i
  const subject=actorFor(worker,project),managing=actorFor(manager),projectPeer=actorFor(peer,project);
  const capture=new RunInspection(root,subject.runId,['synthetic-inspection-secret']);
  capture.record('tool.started',{name:'repo_read',input:'synthetic-inspection-secret',context:'x'.repeat(10000)});
- capture.record('tool.finished',{result:'retained useful result'});
+ capture.record('runtime.tool',{tool:'corporate_repo_read',state:{status:'completed',output:'retained useful result'}});
  const args={collection:'runs',id:subject.runId,view:'inspection',offset:0};
  const index=await broker.call(managing,'company_detail',args);
  expect(JSON.parse(index.content).map((e:any)=>e.eventIndex)).toEqual([1,0]);
+ expect(JSON.parse(index.content)[0]).toMatchObject({tool:'corporate_repo_read',status:'completed'});
  const first=await broker.call(managing,'company_detail',{...args,eventIndex:0});
  expect(first.available).toBe(true);expect(first.content.length).toBeLessThanOrEqual(8000);expect(first.content).not.toContain('synthetic-inspection-secret');
  const next=await broker.call(managing,'company_detail',{...args,eventIndex:0,offset:first.nextOffset});
