@@ -310,8 +310,10 @@ Record the next accountable action with company_command {command:{type:"responsi
   const reviewAvailable=commands.some((command:string)=>['recruitment.approve','recruitment.reject'].includes(command));
   const retryFault=actor.kind==='employee'?this.store.faultContext(actor.runId):undefined;
   const tools=scoped.filter(tool=>tool.name==='revise_and_retry_assignment'?retryFault?.diagnosis.status==='running'&&retryFault.assignment.status==='blocked':tool.name==='review_candidate'?reviewAvailable:!direct[tool.name]||commands.includes(direct[tool.name]));
+  if(this.context(actor).assignment.kind!=='conversation'){
   if(reviewAvailable&&!tools.some(tool=>tool.name==='review_candidate'))tools.push(brokerTools.find(tool=>tool.name==='review_candidate')!);
   for(const [name,command] of Object.entries(direct))if(commands.includes(command)&&!tools.some(tool=>tool.name===name))tools.push(brokerTools.find(tool=>tool.name===name)!);
+  }
   return tools.map(tool=>{
    if(tool.name!=='company_command')return tool;
    const branches=tool.inputSchema.properties.command.anyOf;
@@ -361,6 +363,7 @@ Record the next accountable action with company_command {command:{type:"responsi
  }
  private scopedToolsFor(actor:Actor){
   this.store.validateActor(actor);const {assignment}=this.context(actor);
+  if(assignment.kind==='conversation'){const names=new Set(['company_read','company_detail','company_help','company_command','knowledge_search','send_message','create_assignment','repo_inspect','repo_read','repo_pr','repo_issue','fetch_public']);return brokerTools.filter(tool=>names.has(tool.name));}
   if(this.initialVotePending(actor,assignment)){const names=new Set(['vote_decision','company_help','company_read','company_detail','knowledge_search','repo_inspect','repo_read','repo_pr','repo_issue','fetch_public','browser','inspect_artifact']);return brokerTools.filter(tool=>names.has(tool.name));}
   const fault=actor.kind==='employee'&&this.store.faultContext(actor.runId);
   const original=assignment.payload?.acceptanceAssignmentId?this.store.get('assignments',assignment.payload.acceptanceAssignmentId):undefined;
@@ -514,7 +517,10 @@ Record the next accountable action with company_command {command:{type:"responsi
   for(const value of Object.values(result) as any[])if(Array.isArray(value?.items)){delete value.offset;delete value.nextOffset;}
   return result;
  }
- promptContext(actor:Actor){const {assignment}=this.context(actor),fault=this.faultPromptContext(actor);if(fault)return fault;const responsibility=this.responsibilityPromptContext(actor);if(responsibility)return responsibility;if(assignment.schedulerKey?.startsWith('formation:'))return this.formationContext(actor,assignment);const state=this.companyRead(actor,{collection:'summary'},true);state.assignment=brief(assignment);if(assignment.kind==='conversation')state.ownerConversation=this.readState(actor).messages.filter(m=>m.senderId==='owner'||m.recipientId==='owner').slice(-10).map(m=>({id:m.id,senderId:m.senderId,content:m.content.slice(0,2000)}));if(assignment.payload?.decisionId){const decision=this.readState(actor).decisions.find(d=>d.id===assignment.payload.decisionId);if(decision)state.assignedDecision=brief(decision);}return fitReadPages(state);}
+ promptContext(actor:Actor){const {assignment}=this.context(actor),fault=this.faultPromptContext(actor);if(fault)return fault;const responsibility=this.responsibilityPromptContext(actor);if(responsibility)return responsibility;if(assignment.schedulerKey?.startsWith('formation:'))return this.formationContext(actor,assignment);if(assignment.kind==='conversation'){
+   const state=this.readState(actor);
+   return {company:{name:state.company.name,state:state.company.state},products:state.products.slice(-8).map(p=>({id:p.id,name:p.name,status:p.status})),ownerConversation:state.messages.filter(m=>(m.senderId==='owner'||m.recipientId==='owner')&&m.id!==assignment.payload?.messageId).slice(-4).map(m=>({id:m.id,senderId:m.senderId,content:m.content.slice(0,1200)})),more:'Use company_read for a specific missing collection and company_detail for full records. Product status alone does not establish delivery or adoption.'};
+  }const state=this.companyRead(actor,{collection:'summary'},true);state.assignment=brief(assignment);if(assignment.payload?.decisionId){const decision=this.readState(actor).decisions.find(d=>d.id===assignment.payload.decisionId);if(decision)state.assignedDecision=brief(decision);}return fitReadPages(state);}
  knowledgeContext(actor:Actor,scopeIds:string[],budgetChars=4500){
   const state=this.readState(actor),notes=[];let remaining=budgetChars;
   scopeIds=[...scopeIds,...scopeIds.flatMap(id=>this.store.get('departments',id)?.inheritedDepartmentIds??[])];

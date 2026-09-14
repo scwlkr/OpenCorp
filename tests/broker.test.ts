@@ -1489,3 +1489,11 @@ it('keeps unassigned Telegram intake out of hosted context while sharing it with
  expect(JSON.stringify(broker.promptContext(actor))).not.toContain('SYNTHETIC_PRIVATE_TELEGRAM');
  await expect(broker.call(actor,'company_detail',{collection:'messages',id:message.id})).rejects.toMatchObject({code:'evidence_forbidden'});
 });
+
+it('keeps conversation tool aliases bounded while retaining authorized command access',()=>{
+ const actor=actorFor(ceo);store.update('assignments',store.need('runs',actor.runId).assignmentId,{kind:'conversation'});
+ const tools=broker.toolsFor(actor);
+ expect(tools.map(t=>t.name)).not.toContain('hire_employee');
+ expect(tools.map(t=>t.name)).toEqual(expect.arrayContaining(['company_detail','company_help','create_assignment','send_message']));
+ expect(tools.find(t=>t.name==='company_command')!.inputSchema.properties.command.properties.type.enum).toContain('employee.hire');
+});

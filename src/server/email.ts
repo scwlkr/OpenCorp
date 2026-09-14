@@ -18,7 +18,7 @@ export function emailConfig(root:string):EmailConfig|undefined{
 /** Authenticated private relay; the daemon never needs the Owner's personal inbox. */
 export function emailApi(config:EmailConfig):EmailApi{
  return async(path,body)=>{
-  const response=await fetch(`${config.endpoint.replace(/\/$/,'')}/${path}`,{method:body===undefined?'GET':'POST',headers:{authorization:`Bearer ${config.token}`,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(15000),redirect:'error'});
+  const response=await fetch(`${config.endpoint.replace(/\/$/,'')}/${path}`,{method:body===undefined?'GET':'POST',headers:{authorization:`Bearer ${config.token}`,'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(path==='send'?60000:15000),redirect:'error'});
   if(!response.ok)throw new Error('Email request has no confirmed receipt');return response.json();
  };
 }

@@ -163,6 +163,9 @@ describe('durable dispatch boundaries',()=>{
     const execute=vi.fn(async(_request:any)=>result),broker=new CorporateBroker(store,root),call=vi.spyOn(broker,'call'),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,broker,'http://localhost');
     await (scheduler as any).execute(store.need('runs',run.id));
     expect(execute.mock.calls[0][0].contextTokens).toBe(16384);
+    expect(execute.mock.calls[0][0].corporateOnly).toBe(true);
+    expect(execute.mock.calls[0][0].system.length).toBeLessThan(5000);
+    expect(execute.mock.calls[0][0].prompt).not.toContain('Selected knowledge');
     const system=execute.mock.calls[0][0].system;expect(system).toContain('answer in your final response');expect(system).toContain('persists it as an attributed reply');expect(system).toContain('Your final response is the requested conversation deliverable');expect(execute.mock.calls[0][0].prompt).toContain('Respond through message.send');expect(system).toContain('actual question or request');expect(system).toContain('brief acknowledgment and finish without unsolicited portfolio work');expect(system).not.toContain('Final prose is not a deliverable');
     expect(store.need('runs',run.id)).toMatchObject({status:'succeeded',text});expect(store.need('assignments',assignment.id).status).toBe('completed');expect(store.need('messages',message.id)).toMatchObject({senderId:'owner',content});
     expect(store.list('messages').find(item=>item.runId===run.id)).toMatchObject({senderId:run.employeeId,content:text});expect(store.list('assignments')).toHaveLength(1);expect(store.list('actions')).toEqual([]);expect(call).not.toHaveBeenCalled();
