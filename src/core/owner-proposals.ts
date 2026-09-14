@@ -40,8 +40,8 @@ export function resolveOwnerProposal(store:CompanyStore,message:Message,parentAc
  return store.db.transaction(()=>{
   if(message.proposalResponse)return message.proposalResponse;
   // Permit the standard quoted email tail, never quoted commands or extra authored conditions.
-  const parts=message.email?.direction==='incoming'?message.content.replaceAll('\r\n','\n').split(/\nOn [^\n]+wrote:[ \t]*\n(?=>)/):[message.content];
-  const body=parts.length===2&&parts[1]!.split('\n').every(line=>!line.trim()||line.startsWith('>'))?parts[0]!:message.content;
+  const parts=message.email?.direction==='incoming'?message.content.replaceAll('\r\n','\n').split(/\nOn [^\n]+wrote:[ \t]*\n/):[message.content];
+  const body=parts.length===2&&parts[1]!.split('\n').some(line=>line.startsWith('>'))&&parts[1]!.split('\n').every(line=>!line.trim()||line.startsWith('>'))?parts[0]!:message.content;
   const match=/^(APPROVE|DENY) ([a-f0-9-]{36})$/i.exec(body.trim());
   if(!match)return;
   const channel=message.telegram?.direction==='incoming'?'telegram':message.email?.direction==='incoming'?'email':undefined;
