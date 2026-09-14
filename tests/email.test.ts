@@ -47,7 +47,7 @@ it('relay rejects unauthenticated access and forged inbound reply capabilities w
  expect((await worker.fetch(new Request('https://example.com/inbox'),env)).status).toBe(401);
  const reject=vi.fn();await worker.email({from:config.owner,to:'ceo+'+'0'.repeat(56)+'@example.com',rawSize:10,raw:new ReadableStream(),setReject:reject},env);expect(reject).toHaveBeenCalledOnce();expect(env.INBOX.put).not.toHaveBeenCalled();
 });
-it('applies only the exact nonbillable action, rejects a changed scope and preserves decisions through restore',async()=>{
+it.each(['','\n'])('applies the exact action with quote spacing %j and preserves scope through restore',async quoteSpacing=>{
  let replyTo='';const api=apiWithSend(async body=>{replyTo=body.replyTo;return {id:'proposal-receipt'};});
  const transport=new EmailTransport(store,config,api),message=outgoing();store.update('messages',message.id,{recipientId:message.senderId});store.update('runs',message.runId!,{status:'running',tokenRevoked:false});
  const actor={kind:'employee' as const,employeeId:message.senderId,runId:message.runId!,policyRevision:store.policy.revision};
@@ -56,7 +56,7 @@ it('applies only the exact nonbillable action, rejects a changed scope and prese
  const proposal=store.command(actor,{type:'owner.propose',title:'Local check',content:'No real effect.',proposalScope:'Record one local validation only.',actionId:action.id,expiresAt:new Date(Date.now()+3600000).toISOString(),channel:'email'});
  expect(()=>store.dispatchAction(actor,action.id)).toThrow();
  store.update('runs',actor.runId,{status:'succeeded'});await transport.tick(now);
- api.mockImplementation(async path=>path==='inbox'?{messages:[{id:'e'.repeat(64),from:config.owner,to:replyTo,text:`APPROVE ${proposal.id}\n\nOn Monday, CEO wrote:\n> Earlier proposal` }]}:{ok:true});
+ api.mockImplementation(async path=>path==='inbox'?{messages:[{id:'e'.repeat(64),from:config.owner,to:replyTo,text:`APPROVE ${proposal.id}\n\nOn Monday, CEO wrote:\n${quoteSpacing}> Earlier proposal` }]}:{ok:true});
  await transport.tick(now);expect(store.need('attention',proposal.id).disposition).toMatchObject({decision:'approved',channel:'email'});
  store.update('runs',actor.runId,{tokenRevoked:true});const successor=store.put('runs',{...store.need('runs',actor.runId),id:undefined,status:'running',tokenRevoked:false});const resumed={...actor,runId:successor.id};
  store.update('runs',successor.id,{assignmentId:'different-work'});expect(()=>store.dispatchAction(resumed,action.id)).toThrow('assignment');store.update('runs',successor.id,{assignmentId:store.need('runs',actor.runId).assignmentId});store.update('actions',action.id,{target:'changed-target'});expect(()=>store.dispatchAction(resumed,action.id)).toThrow('scope');
