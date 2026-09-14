@@ -1523,10 +1523,14 @@ it('serves bounded shared inspection to local home management without exposing i
  capture.record('tool.started',{name:'repo_read',input:'synthetic-inspection-secret',context:'x'.repeat(10000)});
  capture.record('tool.finished',{result:'retained useful result'});
  const args={collection:'runs',id:subject.runId,view:'inspection',offset:0};
- const first=await broker.call(managing,'company_detail',args);
+ const index=await broker.call(managing,'company_detail',args);
+ expect(JSON.parse(index.content).map((e:any)=>e.eventIndex)).toEqual([1,0]);
+ const first=await broker.call(managing,'company_detail',{...args,eventIndex:0});
  expect(first.available).toBe(true);expect(first.content.length).toBeLessThanOrEqual(8000);expect(first.content).not.toContain('synthetic-inspection-secret');
- const next=await broker.call(managing,'company_detail',{...args,offset:first.nextOffset});
- expect(next.content).toContain('retained useful result');
+ const next=await broker.call(managing,'company_detail',{...args,eventIndex:0,offset:first.nextOffset});
+ expect(next.content).toContain('xxx');
+ expect((await broker.call(managing,'company_detail',{...args,eventIndex:1})).content).toContain('retained useful result');
+ await expect(broker.call(managing,'company_detail',{...args,eventIndex:2})).rejects.toMatchObject({code:'inspection_event'});
  expect((await broker.call(subject,'company_detail',args)).available).toBe(true);
  expect((await broker.call(projectPeer,'company_detail',{...args,view:'record'})).record.id).toBe(subject.runId);
  await expect(broker.call(projectPeer,'company_detail',args)).rejects.toMatchObject({code:'inspection_forbidden'});
