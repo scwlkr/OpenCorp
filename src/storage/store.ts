@@ -118,12 +118,17 @@ export class CompanyStore {
   /** Follow retained provenance; a new recovery/review is not a data release. */
   confidentialAssignments():Set<string> {
     const assignments=this.list('assignments'),hidden=new Set(assignments.filter(a=>a.dataClass==='confidential').map(a=>a.id));
+    // This synchronous closure cannot change its ancestry: read each origin once,
+    // not once per propagation round for every routing candidate.
+    const origins=new Map(assignments.map(a=>{
+      const artifact=this.get('artifacts',a.payload?.artifactId??a.schedulerKey?.split(':')[1]??'');
+      return [a.id,this.assignmentOrigin(a)??a.payload?.sourceAssignmentId??a.payload?.invalidReviewAssignmentId??artifact?.assignmentId];
+    }));
     let changed=true;
     while(changed){const before=hidden.size;
       const projects=new Set(assignments.filter(a=>hidden.has(a.id)&&a.projectId).map(a=>a.projectId));
       for(const a of assignments){
-        const artifact=this.get('artifacts',a.payload?.artifactId??a.schedulerKey?.split(':')[1]??'');
-        const origin=this.assignmentOrigin(a)??a.payload?.sourceAssignmentId??a.payload?.invalidReviewAssignmentId??artifact?.assignmentId;
+        const origin=origins.get(a.id);
         if(origin&&hidden.has(origin)||a.projectId&&projects.has(a.projectId)||(a.dependencies??[]).some(id=>hidden.has(id)))hidden.add(a.id);
       }
       changed=before!==hidden.size;

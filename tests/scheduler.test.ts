@@ -1002,3 +1002,11 @@ it('retains both local admission waits instead of alternating failed claims',asy
  await scheduler.tick();await scheduler.tick();
  const retained=store.need('assignments',target.id);expect(retained.status).toBe('queued');expect(Date.parse(retained.availableAt)).toBeGreaterThan(Date.now());expect(runtime.execute).toHaveBeenCalledTimes(2);expect(runtime.providerAvailability).not.toHaveBeenCalled();
 });
+it('services a pending Owner stop before admitting more queued work',async()=>{
+ const scheduler=new Scheduler(store,{status:()=>({inferenceSlots:1})} as unknown as LocalRuntime,new CorporateBroker(store,root),'http://localhost');
+ Object.assign(scheduler,{initialized:true,recoveryComplete:true});
+ vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);
+ const before=store.list('runs').length;let stopped=false;
+ const control=new Promise<void>(resolve=>setImmediate(()=>{store.command(owner,{type:'control',action:'stop'});stopped=true;resolve();}));
+ try{await scheduler.tick();expect(stopped).toBe(true);expect(store.list('runs')).toHaveLength(before);}finally{await control;}
+});
