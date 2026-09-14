@@ -16,7 +16,7 @@ import { CorporateBroker } from '../tools/broker.js';
 import { sourceRoot } from '../server/paths.js';
 import { checked, redact } from '../tools/process.js';
 import { prepareProductDependencies } from '../tools/dependencies.js';
-import type { RuntimeResult, ToolEnvironment } from '../runtime/types.js';
+import type { RuntimeResult, ToolEnvironment, RuntimeOptions } from '../runtime/types.js';
 import { isTransientExecutionFailure } from './errors.js';
 import { isNativeStepLimitProtocol } from '../core/runtime-protocol.js';
 import { assertFinalResponseCheckpoint } from '../runtime/final-response.js';
@@ -67,6 +67,12 @@ export function governanceDispatchAllowed(store:CompanyStore,assignment:Assignme
   }
  }
  return true;
+}
+
+/** Shared effective limits also govern owned Ollama parallel context allocation. */
+export function companyResourceBudget(store:CompanyStore):RuntimeOptions['resourceBudget'] {
+ const limits={maxConcurrentTurns:store.policy.maxInference,maxProductiveTurns:store.policy.maxProductiveTurns??1,productiveArtifactIdentity:store.policy.productiveConcurrencyQualification?.artifactIdentity,...(store.policy.productiveConcurrencyQualification?.mode==='local-remote'?{productiveRemoteModelId:store.policy.productiveConcurrencyQualification.remoteModelId,productiveRemoteArtifactIdentity:store.policy.productiveConcurrencyQualification.remoteArtifactIdentity}:store.policy.productiveConcurrencyQualification?.mode==='local-remotes'?{productiveRemoteProfiles:store.policy.productiveConcurrencyQualification.remoteProfiles,productiveProviderCaps:store.policy.productiveConcurrencyQualification.providerCaps}:{}),maxSocialTurns:Math.max(1,store.policy.maxInference-1),maxLoadedModels:store.policy.maxLoadedModels??Math.min(2,store.policy.maxInference)};
+ return store.company.powerMode==='low'?{...limits,maxConcurrentTurns:1,maxProductiveTurns:1,maxSocialTurns:1,maxLoadedModels:1}:limits;
 }
 
 export class Scheduler {
@@ -400,6 +406,7 @@ export class Scheduler {
    try{
     await this.pause(action!=='pause');
     if(this.store.company.state==='running'){
+     await this.runtime.configureResources(companyResourceBudget(this.store));
      for(const assignment of this.store.list('assignments').filter(a=>a.status==='queued'&&a.resourceWait))this.store.update('assignments',assignment.id,{availableAt:new Date().toISOString()});
      this.start();
     }
@@ -414,7 +421,7 @@ export class Scheduler {
   this.controlTail=next.catch(()=>{});return next;
  }
  async pause(stop=false){this.lifecycle++;const active=[...this.active.entries()];for(const [,run] of active)run.controller.abort();await Promise.all(active.map(([id])=>this.runtime.cancel(id)));await this.broker.cancel();if(stop){await Promise.all(active.map(([,run])=>run.done));await this.runtime.stop();this.initialized=false;} }
- async configureResources(){await this.shutdown();await this.runtime.configureDirectFreeModels?.(this.store.policy.directFreeModels??[]);await this.runtime.configureOpenRouterFreeModels?.(this.store.policy.openRouterFreeModels??[]);await this.runtime.configureResources({maxConcurrentTurns:this.store.policy.maxInference,maxProductiveTurns:this.store.policy.maxProductiveTurns??1,productiveArtifactIdentity:this.store.policy.productiveConcurrencyQualification?.artifactIdentity,...(this.store.policy.productiveConcurrencyQualification?.mode==='local-remote'?{productiveRemoteModelId:this.store.policy.productiveConcurrencyQualification.remoteModelId,productiveRemoteArtifactIdentity:this.store.policy.productiveConcurrencyQualification.remoteArtifactIdentity}:this.store.policy.productiveConcurrencyQualification?.mode==='local-remotes'?{productiveRemoteProfiles:this.store.policy.productiveConcurrencyQualification.remoteProfiles,productiveProviderCaps:this.store.policy.productiveConcurrencyQualification.providerCaps}:{}),maxSocialTurns:Math.max(1,this.store.policy.maxInference-1),maxLoadedModels:this.store.policy.maxLoadedModels??Math.min(2,this.store.policy.maxInference)});if(this.store.company.state==='running')this.start();}
+ async configureResources(){await this.shutdown();await this.runtime.configureDirectFreeModels?.(this.store.policy.directFreeModels??[]);await this.runtime.configureOpenRouterFreeModels?.(this.store.policy.openRouterFreeModels??[]);await this.runtime.configureResources(companyResourceBudget(this.store));if(this.store.company.state==='running')this.start();}
  async shutdown(){this.stopping=true;this.startRequested=false;if(this.timer)clearInterval(this.timer);this.timer=undefined;await this.pause(true);}
  async recover(){
   this.recoveryComplete=false;

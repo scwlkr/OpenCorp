@@ -17,7 +17,7 @@ const store = new CompanyStore(root); store.bootstrap();
 const broker = new CorporateBroker(store, root);
 let preparation: AbortController | undefined;
 const cleanups: Promise<void>[] = [];
-const runtime = { status: () => ({ activeRuns: [], ollama: { running: false } }) } as unknown as LocalRuntime;
+const runtime = { configureResources:async()=>{}, status: () => ({ activeRuns: [], ollama: { running: false } }) } as unknown as LocalRuntime;
 const scheduler = Object.assign(new Scheduler(store,runtime,broker,'http://localhost'), { start() {}, async pause() { preparation?.abort(); } });
 // Reproduce cancellation before an inference session exists. The real control
 // command revokes authority immediately; dependency cleanup drains afterward.
