@@ -377,7 +377,7 @@ export class Scheduler {
     throw new Error(`Work checkpoint incomplete: ${outcome.summary}`);
    }
    if(!isNativeStepLimitProtocol(result.text,result.completion)){
-    this.store.command(actor,{type:'message.send',recipientId:assignment.kind==='conversation'&&this.store.get('messages',assignment.payload?.messageId)?.senderId==='owner'?'owner':assignment.supervisorId,projectId:assignment.projectId,wake:!assignment.schedulerKey?.startsWith('message:')&&!['conversation','governance'].includes(assignment.kind),content:result.text||'Run completed; inspect persisted tools and artifacts.'});
+    this.store.command(actor,{type:'message.send',recipientId:assignment.kind==='conversation'&&(assignment.payload?.emailReport||this.store.get('messages',assignment.payload?.messageId)?.senderId==='owner')?'owner':assignment.supervisorId,projectId:assignment.projectId,wake:!assignment.schedulerKey?.startsWith('message:')&&!['conversation','governance'].includes(assignment.kind),...(assignment.payload?.emailReport||this.store.get('messages',assignment.payload?.messageId)?.email?{channel:'email'}:{}),content:result.text||'Run completed; inspect persisted tools and artifacts.'});
     this.store.command(actor,{type:'experience.record',summary:`${assignment.title}: ${result.text.slice(0,4000)}`,source:`run:${run.id}`,learned:'Inspect the retained result and relevant checks before reusing this approach. Technical faults preserve files and require management diagnosis.',modelId:result.modelId,environment:'OpenCorp isolated local runtime'});
    }
    this.store.finishRun(run.id,{status:'succeeded',text:result.text,modelIdentity:result.artifactIdentity,usage:result.usage,messagesPath:result.messagesPath,managementResult:{summary:outcome.summary}});

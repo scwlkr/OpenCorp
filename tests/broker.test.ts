@@ -1160,7 +1160,7 @@ it('direct internal message requires authored content and an existing recipient 
  const req=store.put('experiences',{kind:'requisition',status:'open'});
  await expect(broker.call(actor,'send_message',{...args,projectId:req.id})).rejects.toThrow();
  expect(store.list('messages')).toEqual(before);
- expect(await broker.call(actor,'company_help',{commandType:'message.send'})).toMatchObject({preferredTool:'send_message',directFields:['recipientId','content','projectId','wake']});
+ expect(await broker.call(actor,'company_help',{commandType:'message.send'})).toMatchObject({preferredTool:'send_message',directFields:['recipientId','content','projectId','wake','channel']});
  const result=await broker.call(actor,'send_message',args);
  expect(store.need('messages',result.id)).toMatchObject({...args,senderId:worker.id,runId:actor.runId,projectId:null});
  expect(store.need('runs',actor.runId).corporateCommands.some((receipt:any)=>receipt.type==='message.send'&&receipt.id===result.id)).toBe(true);
