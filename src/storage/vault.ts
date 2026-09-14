@@ -270,13 +270,13 @@ export class KnowledgeVault {
     const checked=sourceDb.pragma('integrity_check',{simple:true});
     if (checked!=='ok') { sourceDb.close(); throw new DomainError('invalid_backup','Backup database failed integrity check'); }
     const priorActions=this.store.list('actions'), revision=this.store.policy.revision;
-    const telegramIntegration=this.store.get('integrations','owner-telegram');
-    const telegramMessages=this.store.list('messages').filter(m=>m.telegram?.direction==='incoming'||telegramIntegration&&m.recipientId==='owner');
-    const telegramMessageIds=new Set(telegramMessages.map(m=>m.id));
-    const telegramRunIds=new Set(telegramMessages.map(m=>m.runId));
-    const telegramRuns=this.store.list('runs').filter(r=>telegramRunIds.has(r.id)||this.store.get('assignments',r.assignmentId)?.payload?.messageId&&telegramMessageIds.has(this.store.need('assignments',r.assignmentId).payload.messageId));
-    const telegramAssignmentIds=new Set(telegramRuns.map(r=>r.assignmentId));
-    const telegramAssignments=this.store.list('assignments').filter(a=>telegramMessageIds.has(a.payload?.messageId)||telegramAssignmentIds.has(a.id));
+    const conversationIntegrations=['owner-telegram','owner-email'].flatMap(id=>{const value=this.store.get('integrations',id);return value?[value]:[];});
+    const conversationMessages=this.store.list('messages').filter(m=>m.telegram?.direction==='incoming'||m.email?.direction==='incoming'||conversationIntegrations.length>0&&m.recipientId==='owner');
+    const conversationMessageIds=new Set(conversationMessages.map(m=>m.id));
+    const conversationRunIds=new Set(conversationMessages.map(m=>m.runId));
+    const conversationRuns=this.store.list('runs').filter(r=>conversationRunIds.has(r.id)||this.store.get('assignments',r.assignmentId)?.payload?.messageId&&conversationMessageIds.has(this.store.need('assignments',r.assignmentId).payload.messageId));
+    const conversationAssignmentIds=new Set(conversationRuns.map(r=>r.assignmentId));
+    const conversationAssignments=this.store.list('assignments').filter(a=>conversationMessageIds.has(a.payload?.messageId)||conversationAssignmentIds.has(a.id)||a.payload?.emailReport);
     const records=Object.fromEntries(TABLES.map(table=>[table,(sourceDb.prepare(`SELECT data FROM ${table}`).all() as {data:string}[]).map(row=>JSON.parse(row.data))]));
     sourceDb.close();
     if (records.company.length!==1||records.policy.length!==1||records.company[0].id!==manifest.companyId) throw new DomainError('invalid_backup','Backup does not contain one consistent company');
@@ -330,11 +330,11 @@ export class KnowledgeVault {
           if (duplicate&&duplicate.id!==action.id) this.store.db.prepare('DELETE FROM actions WHERE id=?').run(duplicate.id);
           this.store.put('actions',{...action,...(['prepared','dispatched'].includes(action.status)?{status:'uncertain'}:{})});
         }
-        // Restoring a backup cannot rewind confirmed Telegram intake or lose an accepted message.
-        if(telegramIntegration)this.store.put('integrations',telegramIntegration);
-        for(const message of telegramMessages)this.store.put('messages',message);
-        for(const run of telegramRuns)this.store.put('runs',{...run,tokenRevoked:true,...(['running','queued','cancelling'].includes(run.status)?{status:'interrupted'}:{})});
-        for(const assignment of telegramAssignments)this.store.put('assignments',{...assignment,...(assignment.status==='running'?{status:'blocked',blockedReason:'Restored conversation requires run reconciliation before resuming'}:{})});
+        // Restoring a backup cannot rewind confirmed Owner intake or lose an accepted message.
+        for(const integration of conversationIntegrations)this.store.put('integrations',integration);
+        for(const message of conversationMessages)this.store.put('messages',message);
+        for(const run of conversationRuns)this.store.put('runs',{...run,tokenRevoked:true,...(['running','queued','cancelling'].includes(run.status)?{status:'interrupted'}:{})});
+        for(const assignment of conversationAssignments)this.store.put('assignments',{...assignment,...(assignment.status==='running'?{status:'blocked',blockedReason:'Restored conversation requires run reconciliation before resuming'}:{})});
         for (const record of this.store.list('knowledge')) { const target=join(this.root,record.path); if (existsSync(target)) this.index(record,readFileSync(target,'utf8')); }
       })();
     } catch (error) { if(existsSync(previous)){rmSync(this.root,{recursive:true,force:true}); renameSync(previous,this.root);}rmSync(staging,{recursive:true,force:true});rmSync(journal); throw error; }

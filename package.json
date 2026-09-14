@@ -34,6 +34,7 @@
     "hono": "4.13.7",
     "ink": "7.1.1",
     "opencode-ai": "1.18.30",
+    "postal-mime": "3.0.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "yaml": "2.9.0",

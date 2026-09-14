@@ -100,7 +100,7 @@ export class TelegramTransport{
  private queueOutgoing(){
   const integration=this.store.need('integrations',integrationId);
   for(const message of this.store.list('messages')){
-   if(message.recipientId!=='owner'||message.senderId==='owner'||message.createdAt<integration.enabledAt)continue;
+   if(message.channel==='email'||message.recipientId!=='owner'||message.senderId==='owner'||message.createdAt<integration.enabledAt)continue;
    const run=message.runId?this.store.get('runs',message.runId):undefined;
    if(!run||run.status!=='succeeded')continue;
    // Plain text, bounded chunks; no Markdown parser or silent truncation.
