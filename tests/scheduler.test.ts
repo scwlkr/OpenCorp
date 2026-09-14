@@ -1016,3 +1016,22 @@ it('services a pending Owner stop before admitting more queued work',async()=>{
  const control=new Promise<void>(resolve=>setImmediate(()=>{store.command(owner,{type:'control',action:'stop'});stopped=true;resolve();}));
  try{await scheduler.tick();expect(stopped).toBe(true);expect(store.list('runs')).toHaveLength(before);}finally{await control;}
 });
+
+it('holds heavy work in Low power and uses only the configured lightweight alternative without changing identity',async()=>{
+ store.update('runs',run.id,{status:'succeeded'});store.update('assignments',assignment.id,{status:'completed'});
+ const employee=store.need('employees',run.employeeId);
+ store.update('models',store.list('models').find(m=>m.name===model)!.id,{size:17_000_000_000});
+ store.put('models',{id:'lightweight',name:'lightweight',artifactIdentity:'synthetic-lightweight',local:true,available:true,size:1_000_000_000,capabilities:['tools']});
+ store.command(owner,{type:'employee.model',employeeId:employee.id,modelId:model,rationale:'Retained heavy work'});
+ const target=store.command(owner,{type:'assignment.create',employeeId:employee.id,title:'Preserved bounded work',instructions:'Read preserved result',acceptance:['Preserve identity'],kind:'management'});
+ store.command(owner,{type:'control',action:'low'});
+ const runtime={status:()=>({inferenceSlots:3})} as unknown as LocalRuntime;
+ const scheduler=new Scheduler(store,runtime,new CorporateBroker(store,root),'http://localhost');Object.assign(scheduler,{recoveryComplete:true,initialized:true});
+ vi.spyOn(scheduler as any,'reconcileOrganization').mockImplementation(()=>{});vi.spyOn(scheduler as any,'deliveryEvents').mockResolvedValue(undefined);vi.spyOn(scheduler as any,'idle').mockImplementation(()=>{});
+ const execute=vi.spyOn(scheduler as any,'execute').mockResolvedValue(undefined);
+ await scheduler.tick();expect(execute).not.toHaveBeenCalled();expect(store.need('assignments',target.id).resourceWait.reason).toContain('Low power');
+ store.command(owner,{type:'employee.model',employeeId:employee.id,modelId:model,fallbackModelIds:['lightweight'],rationale:'This same bounded work suits the installed lightweight model'});
+ store.update('assignments',target.id,{availableAt:new Date().toISOString()});
+ await scheduler.tick();expect(execute).toHaveBeenCalledOnce();expect(execute.mock.calls[0][0]).toMatchObject({employeeId:employee.id,assignmentId:target.id,modelId:'lightweight'});
+ expect(store.need('employees',employee.id).modelId).toBe(model);
+});

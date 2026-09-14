@@ -173,7 +173,7 @@ export class CompanyStore {
     output.events = this.eventLog(Math.max(0,(recent?.id ?? 0)-200));
     if (actor?.kind === 'employee') output.events = output.events.filter((event: CompanyEvent) => !event.type.startsWith('decision.'));
     if(!actor)output.workplace=workplaceSnapshot(this);
-    output.resources = {activeRuns: output.runs.filter((r: EmployeeRun) => r.status === 'running').length, inferenceSlots: output.policy.maxInference, nativeJobs: output.policy.nativeJobs, localOnly: !(output.policy.openRouterFreeModels?.length||output.policy.directFreeModels?.length), directFreeModels: output.policy.directFreeModels??[], openRouterFreeModels: output.policy.openRouterFreeModels ?? [], spendingLimit: output.policy.spendingLimit};
+    output.resources = {activeRuns: output.runs.filter((r: EmployeeRun) => r.status === 'running').length, inferenceSlots: this.company.state!=='running'?0:this.company.powerMode==='low'?1:output.policy.maxInference, nativeJobs: output.policy.nativeJobs, localOnly: !(output.policy.openRouterFreeModels?.length||output.policy.directFreeModels?.length), directFreeModels: output.policy.directFreeModels??[], openRouterFreeModels: output.policy.openRouterFreeModels ?? [], spendingLimit: output.policy.spendingLimit};
     return output;
   }
 
@@ -322,10 +322,10 @@ export class CompanyStore {
       }
       case 'control': {
         if (actor.kind !== 'owner') throw new DomainError('owner_required','Lifecycle is an Owner control',403);
-        const states: Record<string,string> = {start:'running',resume:'running',pause:'paused',stop:'stopped'};
-        if (!states[c.action]) throw new DomainError('invalid_control','Use start, resume, pause or stop');
-        this.update('company',this.company.id,{state: states[c.action] as any});
-        if (c.action === 'pause' || c.action === 'stop') for (const run of this.list('runs').filter(item => item.status === 'running' || item.status === 'queued')) this.revokeRun(run.id,c.action);
+        const states: Record<string,string> = {start:'running',resume:'running',full:'running',low:'running',pause:'paused',stop:'stopped'};
+        if (!states[c.action]) throw new DomainError('invalid_control','Use full, low, stop, start, resume or pause');
+        this.update('company',this.company.id,{state: states[c.action] as any,powerMode:c.action==='full'||c.action==='low'?c.action:this.company.powerMode??'full'});
+        if (['pause','stop','full','low'].includes(c.action)) for (const run of this.list('runs').filter(item => item.status === 'running' || item.status === 'queued')) this.revokeRun(run.id,c.action);
         return this.snapshot();
       }
       case 'policy.update': {

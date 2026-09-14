@@ -38,11 +38,12 @@ export class TelegramTransport{
  private controller=new AbortController();
  private timer?:ReturnType<typeof setTimeout>;
  private readonly binding:string;
- constructor(private store:CompanyStore,private config:TelegramConfig,private api:TelegramApi=telegramApi(config)){
+ constructor(private store:CompanyStore,private config:TelegramConfig,private api:TelegramApi=telegramApi(config),private control?:(action:string,messageId:string)=>Promise<unknown>){
   this.binding=createHash('sha256').update(`${config.token.split(':')[0]}:${config.ownerUserId}:${config.chatId}`).digest('hex');
   const prior=store.get('integrations',integrationId);
   if(prior&&prior.binding!==this.binding)throw new Error('Telegram identity changed. Reconcile retained integration before changing the bot or Owner chat.');
   if(!prior)store.put('integrations',{id:integrationId,name:'Owner Telegram',status:'ready',detail:'Configured; real Owner exchange not yet observed.',binding:this.binding,offset:0,enabledAt:new Date().toISOString()});
+  if(control&&!store.need('integrations',integrationId).controlEnabledAt)store.update('integrations',integrationId,{controlEnabledAt:new Date().toISOString()});
   for(const action of store.list('actions').filter(a=>a.kind==='telegram.send'&&a.status==='dispatched'))store.update('actions',action.id,{status:'uncertain',uncertainReason:'Service interrupted during Telegram send; inspect the private chat before reconciliation.'});
  }
  start(){void this.cycle();}
@@ -59,8 +60,8 @@ export class TelegramTransport{
    // Send before long polling so a completed reply does not wait an extra polling cycle.
    this.queueOutgoing();
    const actions=this.store.list('actions');
-   const action=actions.find(a=>a.kind==='telegram.send'&&a.status==='prepared'&&a.target===this.binding&&actions.filter(previous=>previous.kind==='telegram.send'&&previous.content.messageId===a.content.messageId&&previous.content.part<a.content.part).every(previous=>previous.status==='succeeded'));
-   if(action&&this.store.company.state==='running'){
+   const action=actions.find(a=>a.kind==='telegram.send'&&a.status==='prepared'&&a.target===this.binding&&(this.store.company.state==='running'||a.content.companyControl)&&actions.filter(previous=>previous.kind==='telegram.send'&&previous.content.messageId===a.content.messageId&&previous.content.part<a.content.part).every(previous=>previous.status==='succeeded'));
+   if(action&&(this.store.company.state==='running'||action.content.companyControl)){
     // An unresolved earlier part holds this message, not unrelated conversations.
     {
      this.store.update('actions',action.id,{status:'dispatched'});
@@ -78,6 +79,14 @@ export class TelegramTransport{
    if(response.ok!==true||!Array.isArray(response.result))throw new Error('Telegram polling unavailable');
    for(const update of response.result as Update[])this.accept(update);
    for(const message of this.store.list('messages').filter(m=>m.telegram?.direction==='incoming')){
+    const command=/^\/(full|low|stop)\s*$/i.exec(message.content.trim())?.[1]?.toLowerCase();
+    if(command&&this.control&&message.createdAt>=integration.controlEnabledAt){
+     if(!message.companyControl)await this.control(command,message.id);
+     const applied=this.store.need('messages',message.id).companyControl?.phase==='applied';
+     const dedupeKey=`telegram-control:${message.id}`;
+     if(!this.store.list('actions').some(a=>a.dedupeKey===dedupeKey))this.store.put('actions',{employeeId:'owner',runId:'',productId:'',kind:'telegram.send',target:this.binding,content:{messageId:message.id,part:0,companyControl:true,text:applied?`Company ${command==='stop'?'stopped':command==='low'?'in Low power':'in Full power'}. Work preserved. Product hosting unchanged.`:'Control requested; runtime cleanup was not confirmed. Inspect local state and owned processes before deliberately resuming. Work preserved; product hosting unchanged.'},dedupeKey,status:'prepared',policyRevision:this.store.policy.revision,cost:0,costEvidence:'Telegram ordinary control receipt; paid broadcast disabled.'});
+     continue;
+    }
     if(!this.store.list('assignments').some(a=>a.payload?.messageId===message.id)){
      try{const response=resolveOwnerProposal(this.store,message,message.telegram.parentActionId);queueOwnerConversation(this.store,{content:response?`${message.content}\nVerified proposal response: ${JSON.stringify(response)}. Report this recorded outcome; do not reinterpret it or change permissions.`:message.content},message.id);}catch(error){if(!(error instanceof DomainError&&error.code==='recipient_unavailable'))throw error;}
     }

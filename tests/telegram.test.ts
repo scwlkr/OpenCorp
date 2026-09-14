@@ -2,6 +2,9 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Scheduler } from '../src/scheduler/scheduler.js';
+import type { LocalRuntime } from '../src/runtime/index.js';
+import type { CorporateBroker } from '../src/tools/broker.js';
 import { CompanyStore } from '../src/storage/store.js';
 import { TelegramTransport, reconcileTelegram, type TelegramApi } from '../src/server/telegram.js';
 let root:string,store:CompanyStore;
@@ -81,4 +84,32 @@ it('binds an explicit Owner approval to the delivered proposal and never replays
  store.close();store=new CompanyStore(root);
  api.mockResolvedValue({ok:true,result:[reply(3,`APPROVE ${proposal.id}`),reply(4,`DENY ${proposal.id}`)]});await new TelegramTransport(store,config,api).tick();
  expect(store.need('attention',proposal.id).disposition).toEqual(disposition);expect(store.policy.spendingLimit).toBe(0);
+});
+
+it('authenticates immediate controls, acknowledges Stop while stopped, and never reapplies a replay after local resume',async()=>{
+ const update=(id:number,user=123)=>{const value=incoming(id,user);value.message.text='/stop';return value;};
+ const api=vi.fn<TelegramApi>().mockImplementation(async method=>({ok:true,result:method==='getUpdates'?[update(1,999),update(2)]:{message_id:77}}));
+ const control=vi.fn(async(action:string,messageId:string)=>{store.db.transaction(()=>{store.command({kind:'owner'},{type:'control',action});store.update('messages',messageId,{companyControl:{action,phase:'applied'}});})();});
+ const transport=new TelegramTransport(store,config,api,control);
+ // An ordinary pending reply must not hide the control receipt while stopped.
+ await transport.tick();outgoing();expect(store.company.state).toBe('stopped');expect(control).toHaveBeenCalledOnce();expect(store.list('assignments')).toHaveLength(0);
+ await transport.tick();expect(api.mock.calls.filter(c=>c[0]==='sendMessage')).toHaveLength(1);
+ store.command({kind:'owner'},{type:'control',action:'full'});
+ store.close();store=new CompanyStore(root);
+ await new TelegramTransport(store,config,api,control).tick();expect(store.company.state).toBe('running');expect(control).toHaveBeenCalledOnce();
+ expect(store.list('actions').filter(a=>a.content.companyControl)).toHaveLength(1);
+});
+
+
+it('holds a failed cleanup and reports its actual gate without replaying the control',async()=>{
+ const update=incoming();update.message.text='/low';
+ const api=vi.fn<TelegramApi>().mockImplementation(async method=>({ok:true,result:method==='getUpdates'?[update]:{message_id:88}}));
+ const runtime={stop:vi.fn(async()=>{throw new Error('Synthetic owned-provider cleanup failure');})} as unknown as LocalRuntime;
+ const scheduler=new Scheduler(store,runtime,{cancel:async()=>{}} as unknown as CorporateBroker,'http://localhost');
+ const transport=new TelegramTransport(store,config,api,(action,id)=>scheduler.control(action,id));
+ await expect(transport.tick()).rejects.toThrow('cleanup failure');expect(store.company.state).toBe('paused');
+ expect(store.list('messages')[0]!.companyControl.phase).toBe('failed');
+ await transport.tick();await transport.tick();
+ expect(runtime.stop).toHaveBeenCalledOnce();expect(store.list('actions')[0]!.content.text).toContain('cleanup was not confirmed');
+ expect(store.list('actions')[0]!.status).toBe('succeeded');expect(store.list('assignments')).toHaveLength(0);
 });

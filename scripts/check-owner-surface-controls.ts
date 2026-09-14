@@ -6,7 +6,7 @@ import { serve } from '@hono/node-server';
 import { CompanyStore } from '../src/storage/store.js';
 import { ownerApp } from '../src/server/app.js';
 import { CorporateBroker } from '../src/tools/broker.js';
-import type { Scheduler } from '../src/scheduler/scheduler.js';
+import { Scheduler } from '../src/scheduler/scheduler.js';
 import type { LocalRuntime } from '../src/runtime/index.js';
 import { withOwnerMutationSurfaces } from '../tests/surfaces.browser.js';
 
@@ -17,8 +17,8 @@ const store = new CompanyStore(root); store.bootstrap();
 const broker = new CorporateBroker(store, root);
 let preparation: AbortController | undefined;
 const cleanups: Promise<void>[] = [];
-const scheduler = { start() {}, async pause() { preparation?.abort(); } } as unknown as Scheduler;
-const runtime = { status: () => ({ activeRuns: [], ollama: { running: false } }) } as unknown as LocalRuntime;
+const runtime = { configureResources:async()=>{}, status: () => ({ activeRuns: [], ollama: { running: false } }) } as unknown as LocalRuntime;
+const scheduler = Object.assign(new Scheduler(store,runtime,broker,'http://localhost'), { start() {}, async pause() { preparation?.abort(); } });
 // Reproduce cancellation before an inference session exists. The real control
 // command revokes authority immediately; dependency cleanup drains afterward.
 const preparingRun = () => {
