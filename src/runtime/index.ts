@@ -112,10 +112,10 @@ export class LocalRuntime {
     return this.models();
   }
 
-  async installModels(): Promise<RuntimeModel[]> {
+  async installModels(installedOnly=false): Promise<RuntimeModel[]> {
     const starting = this.start(), generation = this.generation;
     await starting; this.assertLifecycle(generation);
-    await this.ollama.ensureSmallModel(); this.assertLifecycle(generation);
+    if(!installedOnly)await this.ollama.ensureSmallModel(); this.assertLifecycle(generation);
     return this.models();
   }
 

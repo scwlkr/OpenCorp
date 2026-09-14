@@ -48,7 +48,7 @@ export class OwnerClient {
     return value as T;
   }
   state(signal?: AbortSignal): Promise<CompanySnapshot> { return this.request('state', undefined, signal); }
-  control(action: 'start' | 'pause' | 'resume' | 'stop'): Promise<CompanySnapshot> { return this.request('control', { action }); }
+  control(action: 'full' | 'low' | 'start' | 'pause' | 'resume' | 'stop'): Promise<CompanySnapshot> { return this.request('control', { action }); }
   chat(content: string, target: { projectId?: string; employeeId?: string } = {}): Promise<unknown> { return this.request('chat', { content, ...target }); }
   async events(onEvent: () => void, signal: AbortSignal, lastEventId = ''): Promise<void> {
     const { discovery, token } = await readConnection(this.dataRoot);

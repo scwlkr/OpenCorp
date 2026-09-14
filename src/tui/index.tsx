@@ -69,7 +69,7 @@ export function TerminalApp({ client }: { client: OwnerClient }) {
   const alive = useRef(true); const refreshing = useRef(false);
   const width = Math.max(24, (stdout.columns || 90) - 6);
   const composing=tab===6||tab===11,inputDraft=tab===11?commandDraft:draft,setInputDraft=tab===11?setCommandDraft:setDraft;
-  const help = composing ? 'Enter send · Ctrl+U clear · Tab browse · Esc overview · Ctrl+C close' : 'Tab all views · 1–9 jump · ↑↓ browse · Enter details · Esc back · p pause · r resume · s stop · f refresh · q close';
+  const help = composing ? 'Enter send · Ctrl+U clear · Tab browse · Esc overview · Ctrl+C close' : 'Tab all views · 1–9 jump · ↑↓ browse · Enter details · Esc back · f full power · l low power · p pause · r resume · s stop · x refresh · q close';
   let navigationRows = 1; let navigationWidth = 0;
   for (const name of tabs) { const size = name.length + 2; if (navigationWidth && navigationWidth + size + 2 > width + 4) { navigationRows++; navigationWidth = 0; } navigationWidth += size + (navigationWidth ? 2 : 0); }
   const chromeRows = 3 + navigationRows + 1 + wrappedLines(help, width + 4).length + 1 + (error ? wrappedLines(error, width + 4).length : 0) + (notice ? wrappedLines(notice, width + 4).length : 0) + (pending ? 1 : 0) + (composing ? 3 : 0) + (tab === 0 || composing || detail ? 1 : 0);
@@ -92,13 +92,13 @@ export function TerminalApp({ client }: { client: OwnerClient }) {
     void connect();
     return () => { alive.current = false; clearInterval(timer); if (reconnect) clearTimeout(reconnect); controller?.abort(); };
   }, [client, refresh]);
-  const control = async (action: 'pause' | 'resume' | 'stop') => { setPending(true); try { await client.control(action); setNotice(`Company ${action === 'pause' ? 'paused' : action === 'resume' ? 'resumed' : 'stopped'}.`); await refresh(); } catch (failure) { setNotice(failure instanceof Error ? failure.message : 'Control failed'); } finally { setPending(false); } };
+  const control = async (action: 'full' | 'low' | 'pause' | 'resume' | 'stop') => { setPending(true); try { await client.control(action); setNotice(`Company ${action === 'pause' ? 'paused' : action === 'resume' ? 'resumed' : action === 'full' ? 'in Full power' : action === 'low' ? 'in Low power' : 'stopped'}.`); await refresh(); } catch (failure) { setNotice(failure instanceof Error ? failure.message : 'Control failed'); } finally { setPending(false); } };
   const send = async () => { if (!inputDraft.trim() || pending) return; setPending(true); try { if(tab===11){const command:unknown=JSON.parse(inputDraft);if(!command||typeof command!=='object'||Array.isArray(command)||typeof (command as {type?:unknown}).type!=='string')throw new Error('Command requires a JSON object containing type.');await client.request('command',command);}else await client.chat(inputDraft.trim()); setInputDraft(''); setNotice(tab===11?'Command saved.':'Message saved.'); await refresh(); } catch (failure) { setNotice(failure instanceof Error ? failure.message : 'Message failed'); } finally { setPending(false); } };
   const records = state ? tuiRecords(state, tab) : [];
   const activeRecord = records[Math.min(selected, Math.max(0, records.length - 1))];
   let body = '';
   if (state) {
-    if (tab === 0) body = [`${state.company.name} · ${state.company.state}`, '', state.company.mandate, '', `Work: ${state.assignments.filter((item) => item.status === 'running').length} running · ${state.assignments.filter((item) => item.status === 'queued').length} queued · ${state.assignments.filter((item) => item.status === 'completed').length} completed`, `Inference: ${state.runs.filter((item) => item.status === 'running').length}/${state.policy.maxInference} slots · local only`, `Unapproved spending: $${state.policy.spendingLimit} · Owner attention: ${state.attention.filter((item) => item.status === 'open').length}`, '', 'CURRENT PRIORITIES', ...[...state.products].sort((a, b) => b.priority - a.priority).map((product) => `${product.name}: ${product.rationale || 'Leadership assessment pending'}`), '', 'CURRENT WORK', ...state.assignments.filter((item) => !['completed', 'cancelled'].includes(item.status)).map((item) => `${item.status}: ${item.title} (${employeeName(state, item.employeeId)})`)].join('\n');
+    if (tab === 0) body = [`${state.company.name} · ${state.company.state} · ${state.company.powerMode??'full'} power`, '', state.company.mandate, '', `Work: ${state.assignments.filter((item) => item.status === 'running').length} running · ${state.assignments.filter((item) => item.status === 'queued').length} queued · ${state.assignments.filter((item) => item.status === 'completed').length} completed`, `Inference: ${state.runs.filter((item) => item.status === 'running').length}/${state.resources.inferenceSlots} effective slots`, `Unapproved spending: $${state.policy.spendingLimit} · Owner attention: ${state.attention.filter((item) => item.status === 'open').length}`, '', 'CURRENT PRIORITIES', ...[...state.products].sort((a, b) => b.priority - a.priority).map((product) => `${product.name}: ${product.rationale || 'Leadership assessment pending'}`), '', 'CURRENT WORK', ...state.assignments.filter((item) => !['completed', 'cancelled'].includes(item.status)).map((item) => `${item.status}: ${item.title} (${employeeName(state, item.employeeId)})`)].join('\n');
     else if (tab===11) body='Owner command\n\nEnter a JSON company command. Server authority checks apply.\nExample: {"type":"workplace.configure","enabled":false}\n\nUse attention.acknowledge to mark a request seen; attention.resolve requires the actual completed prerequisite.\nCLI alternative: opencorp command <json>';
     else if (tab === 6) {
       const ceo = state.employees.find((employee) => employee.status === 'active' && state.positions.find((position) => position.id === employee.positionId)?.level === 'ceo');
@@ -124,10 +124,12 @@ export function TerminalApp({ client }: { client: OwnerClient }) {
       return;
     }
     if (input === 'q') { exit(); return; }
+    if (input === 'f' && !pending) { void control('full'); return; }
+    if (input === 'l' && !pending) { void control('low'); return; }
     if (input === 'p' && !pending) { void control('pause'); return; }
     if (input === 'r' && !pending) { void control('resume'); return; }
     if (input === 's' && !pending) { setConfirmStop(true); return; }
-    if (input === 'f') { void refresh(); return; }
+    if (input === 'x') { void refresh(); return; }
     if (/^[1-9]$/.test(input)) { setTab(Number(input) - 1); setSelected(0); setDetail(false); setOffset(0); return; }
     if (key.return && activeRecord) { setDetail(true); setOffset(0); return; }
     if (key.upArrow || key.downArrow) {
@@ -141,7 +143,7 @@ export function TerminalApp({ client }: { client: OwnerClient }) {
   const start = Math.min(offset, maxOffset);
   const listStart = Math.max(0, selected - height + 1);
   return <Box flexDirection="column" paddingX={1}>
-    <Box justifyContent="space-between" borderStyle="single" borderColor="cyan" paddingX={1}><Text bold>OpenCorp · Owner terminal</Text><Text color={connected ? 'green' : 'yellow'}>{connected ? state?.company.state : 'reconnecting'}</Text></Box>
+    <Box justifyContent="space-between" borderStyle="single" borderColor="cyan" paddingX={1}><Text bold>OpenCorp · Owner terminal</Text><Text color={connected ? 'green' : 'yellow'}>{connected ? `${state?.company.state} · ${state?.company.powerMode??'full'} power` : 'reconnecting'}</Text></Box>
     <Box columnGap={2} rowGap={0} flexWrap="wrap" marginBottom={1}>{tabs.map((name, index) => <Text key={name} bold={tab === index} color={tab === index ? 'cyan' : 'gray'} inverse={tab === index}>{index + 1} {name}</Text>)}</Box>
     {error && <Text color="yellow">{clean(error)}</Text>}
     <Box height={height} flexDirection="column" overflow="hidden">

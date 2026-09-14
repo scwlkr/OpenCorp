@@ -38,7 +38,7 @@ writePrivate(join(dataRoot,'discovery.json'),JSON.stringify({url,pid:process.pid
 process.stdout.write(`OpenCorp ${url} (${store.company.state})\n`);
 await scheduler.recover();if(store.company.state==='running')scheduler.start();
 let telegram:TelegramTransport|undefined;
-try{const config=telegramConfig(dataRoot);if(config){telegram=new TelegramTransport(store,config);telegram.start();}}catch{store.emit('telegram.unavailable',{detail:'Check private Telegram configuration and retained integration identity.'});}
+try{const config=telegramConfig(dataRoot);if(config){telegram=new TelegramTransport(store,config,undefined,(action,messageId)=>scheduler.control(action,messageId));telegram.start();}}catch{store.emit('telegram.unavailable',{detail:'Check private Telegram configuration and retained integration identity.'});}
 let email:EmailTransport|undefined;
 try{const config=emailConfig(dataRoot);if(config){email=new EmailTransport(store,config);email.start();}}catch{store.emit('email.unavailable',{detail:'Check private email configuration and retained integration identity.'});}
 const maintain=setInterval(()=>{try{pruneInspections(dataRoot);store.vault.scan();if(store.company.expansion)void notifyOwnerRequests(store).catch(error=>{if(store.db.open)store.emit('maintenance.error',{error:redact(String(error))});});for(const name of ['daemon.log','service.log']){const path=join(dataRoot,'logs',name);if(existsSync(path)&&statSync(path).size>10_000_000){copyFileSync(path,`${path}.1`);truncateSync(path,0);}}}catch(error){store.emit('maintenance.error',{error:redact(String(error))});}},30_000);maintain.unref();

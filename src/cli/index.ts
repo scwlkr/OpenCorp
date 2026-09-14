@@ -47,7 +47,7 @@ export function createProgram(): Command {
   program.command('init').description('Initialize the persistent company and start its local service').action(async () => { await ensureDaemon(root()); show(await client().state()); });
   program.command('start').description('Start the service and explicitly start company work').action(async () => { await ensureDaemon(root()); show(await client().control('start')); });
   program.command('status').description('Show actual company state, work, policy, and resources').action(async () => show(await client().state()));
-  for (const action of ['pause', 'resume', 'stop'] as const) program.command(action).description(({ pause: 'Pause dispatch and cancel active model turns; preserve work', resume: 'Resume company work after a pause', stop: 'Stop company work and owned runtimes; preserve intentional stop across restarts' })[action]).action(async () => show(await client().control(action)));
+  for (const action of ['full', 'low', 'pause', 'resume', 'stop'] as const) program.command(action).description(({ full: 'Full power: use configured available throughput', low: 'Low power: one lightweight local or permitted hosted turn', pause: 'Pause dispatch and cancel active model turns; preserve work', resume: 'Resume company work after a pause', stop: 'Stop company work and owned runtimes; preserve intentional stop across restarts' })[action]).action(async () => show(await client().control(action)));
   program.command('open').description('Open the authenticated Owner WebUI').action(async () => {
     await ensureDaemon(root()); const { discovery } = await readConnection(root());
     const session = await client().request<{ url: string }>('session', {});

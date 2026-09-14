@@ -4,7 +4,7 @@ export type AssignmentState = 'queued' | 'running' | 'awaiting_review' | 'needs_
 export type RunState = 'queued' | 'running' | 'cancelling' | 'succeeded' | 'failed' | 'interrupted' | 'uncertain';
 export type Actor = { kind: 'owner' } | { kind: 'employee'; employeeId: string; runId: string; policyRevision: number };
 export interface RecordBase { id: string; createdAt: string; updatedAt: string; [key: string]: any }
-export interface Company extends RecordBase { name: string; state: CompanyLifecycle; bootstrap: string; mandate: string }
+export interface Company extends RecordBase { name: string; state: CompanyLifecycle; powerMode?: 'full' | 'low'; bootstrap: string; mandate: string }
 export interface OwnerPolicy extends RecordBase { revision: number; spendingLimit: number; localOnly: boolean; freeInferencePool?: boolean; openRouterFreeModels?: string[]; directFreeModels?: string[]; maxInference: number; maxProductiveTurns?: number; nativeJobs: number; maxRetries: number; maxCorrections: number; reassessMinutes: number; allowedRepositories: string[] }
 export interface Product extends RecordBase { name: string; repository: string; assessment: string; goals: any[]; roadmap: any[]; status: string; priority: number; rationale: string }
 export interface Department extends RecordBase { name: string; managerId: string; responsibilities: string }
