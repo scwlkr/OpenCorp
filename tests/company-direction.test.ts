@@ -56,3 +56,14 @@ it('new companies do not generate legacy required staffing even with a retained 
  reconcileFormation(store);
  expect(store.list('assignments')).toEqual([]);
 });
+
+it('registers additional products only inside existing Owner repository authority',()=>{
+ const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
+ const policy=store.policy;
+ expect(()=>store.command(owner,{type:'product.register',name:'Outside',repository:'/synthetic/unapproved',managerId:ceo.id,rationale:'New need'})).toThrow(/Owner access envelope/);
+ const repository=policy.allowedRepositories[0];const previous=store.list('products').find(p=>p.repository===repository)!;store.update('products',previous.id,{repository:'/synthetic/retained-other'});
+ const result=store.command(owner,{type:'product.register',name:'Configured product',repository,managerId:ceo.id,rationale:'Existing permitted need'});
+ expect(result.repository).toBe(repository);expect(store.policy).toEqual(policy);
+ const worker=store.list('employees').find(e=>store.level(e.id)==='worker');
+ if(worker){const run=store.put('runs',{employeeId:worker.id,status:'running',tokenRevoked:false,policyRevision:policy.revision});expect(()=>store.command({kind:'employee',employeeId:worker.id,runId:run.id,policyRevision:policy.revision},{type:'product.register',name:'Unauthorized',repository,rationale:'No authority'})).toThrow();}
+});

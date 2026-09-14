@@ -74,7 +74,7 @@ export class WorkspaceManager {
   const resolved={...project,...candidate.workspace};this.validate(resolved);safeChild(mirror,gitDir);if(await this.head(resolved,options)!==selected.headSha||!await this.clean(resolved,options))throw new DomainError('candidate_changed','Existing candidate workspace differs from the selected clean PR; preserved without reset',409);
   await this.assertPullRequest(project,live.source,options);options.assertActive();this.store.update('assignments',assignment.id,{pullRequestCandidate:candidate});return resolved;
  }
- private async readBlob(mirror:string,commit:string,file:string):Promise<string>{
+ async readBlob(mirror:string,commit:string,file:string):Promise<string>{
   if(!/^[a-f0-9]{40,64}$/i.test(commit))throw new DomainError('source_identity_required','Source reads require the recorded immutable baseline commit.',409);
   safeChild(join(this.dataRoot,'repositories'),mirror);
   const object=`${commit}:${file}`,env={...brokerEnvironment(),GIT_CONFIG_GLOBAL:'/dev/null'},maximum=2_000_000;

@@ -250,40 +250,45 @@ export async function prepareProductDependencies(options: Options): Promise<Depe
 
 async function prepare(options: Options): Promise<DependencyResult> {
   const paths = await scopedPaths(options.workspace, options.dataRoot);
-  const product = options.productName.toLowerCase();
+  const hasFile=async(file:string)=>{try{await stat(join(paths.workspace,file));return true;}catch(error:any){if(error.code!=='ENOENT')throw error;return false;}};
+  const product=await hasFile('package-lock.json')?(await hasFile('native/package-lock.json')?'node-native':'node'):await hasFile('Gemfile.lock')?'ruby':'standalone';
+  const nodeProduct=product==='node-native'||product==='node';
   const node = join(homedir(), '.local/share/mise/installs/node/22.22.3');
   const ruby = join(homedir(), '.local/share/mise/installs/ruby/3.4.8');
-  const lockfiles = product === 'openjob' ? ['package-lock.json', 'native/package-lock.json'] : product === 'palettewow' ? ['Gemfile.lock'] : product === 'walklang' ? [] : undefined;
-  if (!lockfiles) throw new Error('Unknown product dependency policy');
+  const lockfiles = product === 'node-native' ? ['package-lock.json', 'native/package-lock.json'] : product === 'ruby' ? ['Gemfile.lock'] : product === 'node' ? ['package-lock.json'] : [];
   const locks = await Promise.all(lockfiles.map(path => readFile(join(paths.workspace, path), 'utf8')));
-  const manifests = await Promise.all((product === 'openjob' ? ['package.json', 'native/package.json'] : product === 'palettewow' ? ['Gemfile'] : []).map(path => readFile(join(paths.workspace, path), 'utf8')));
-  if (product === 'palettewow') manifests.push(await readFile(join(paths.workspace, 'config/importmap.rb'), 'utf8'));
+  const manifests = await Promise.all((product === 'node-native' ? ['package.json', 'native/package.json'] : product === 'ruby' ? ['Gemfile'] : product === 'node' ? ['package.json'] : []).map(path => readFile(join(paths.workspace, path), 'utf8')));
+  if (product === 'ruby'&&await hasFile('config/importmap.rb')) manifests.push(await readFile(join(paths.workspace, 'config/importmap.rb'), 'utf8'));
   const lockDigest = digest([...locks, ...manifests].join('\n'));
   const receiptPath = join(paths.stateRoot, `${paths.key}.json`);
   const artifactsRoot = join(options.dataRoot, 'runtime/dependency-artifacts'); await mkdir(artifactsRoot, { recursive: true });
   const environment: ToolEnvironment = { binPaths: [], readPaths: [paths.cacheRoot], writePaths: [paths.cacheRoot], variables: {} };
-  if (product === 'openjob') {
+  if (nodeProduct) {
     await stat(join(node, 'bin/node')); environment.binPaths.push(join(node, 'bin')); environment.readPaths.push(node);
     environment.variables = { npm_config_cache: join(paths.cacheRoot, 'npm'), npm_config_offline: 'true', npm_config_audit: 'false', npm_config_fund: 'false', npm_config_registry: 'https://registry.npmjs.org', PLAYWRIGHT_BROWSERS_PATH: join(paths.cacheRoot, 'browsers') };
-  } else if (product === 'palettewow') {
+  } else if (product === 'ruby') {
     await stat(join(ruby, 'bin/ruby')); environment.binPaths.push(join(ruby, 'bin')); environment.readPaths.push(ruby);
     environment.variables = { BUNDLE_PATH: join(paths.cacheRoot, 'bundle'), BUNDLE_CACHE_PATH: join(paths.cacheRoot, 'gem-cache'), BUNDLE_USER_CACHE: join(paths.cacheRoot, 'bundler-cache'), BUNDLE_USER_CONFIG: join(paths.cacheRoot, 'bundler-config'), BUNDLE_FROZEN: 'true', BUNDLE_DISABLE_SHARED_GEMS: 'true', BUNDLE_IGNORE_CONFIG: 'true', GEM_HOME: join(paths.cacheRoot, 'gems'), GEM_PATH: join(ruby, 'lib/ruby/gems/3.4.0'), BUNDLE_BUILD__PG: '--with-pg-config=/opt/homebrew/opt/libpq/bin/pg_config' };
   }
   const result: DependencyResult = { workspace: paths.workspace, productName: options.productName, lockDigest, environment, installed: false, checks: [], receiptPath, artifacts: 0, downloaded: 0, reused: 0, incrementalCost: 0 };
+  if(product==='standalone') {
+    try { const manifest=JSON.parse(await readFile(join(paths.workspace,'package.json'),'utf8')); if(['dependencies','devDependencies','optionalDependencies'].some(key=>Object.keys(manifest[key]??{}).length))throw new Error('Node dependencies require a committed package-lock.json before preparation'); } catch(error:any) { if(error.code!=='ENOENT')throw error; }
+    return {...result,installed:true};
+  }
   // Reuse completed environments only while lockfiles and installed roots remain present.
   try {
     const saved = JSON.parse(await readFile(receiptPath, 'utf8')) as DependencyResult;
     if (saved.installed && saved.lockDigest === lockDigest && saved.workspace === paths.workspace) {
       const check = await executeSandboxed({ workspace: paths.workspace, dataRoot: options.dataRoot, signal: options.signal, toolEnvironment: environment,
-        command: product === 'palettewow' ? ['bundle', 'check'] : product === 'openjob' ? ['node', '-e', 'require.resolve("next/package.json");require.resolve("react-native/package.json",{paths:["./native"]})'] : ['/usr/bin/true'] });
+        command: product === 'ruby' ? ['bundle', 'check'] : product === 'node-native' ? 'npm ls --offline --depth=0 && npm --prefix native ls --offline --depth=0' : product === 'node' ? ['npm','ls','--offline','--depth=0'] : ['/usr/bin/true'] });
       if (check.code === 0) {
-        if (product === 'palettewow') { saved.checks.push(...await prepareAdvisories(options, environment)); saved.environment = environment; await writeFile(receiptPath, JSON.stringify(saved, null, 2), { mode: 0o600 }); }
+        if (product === 'ruby') { saved.checks.push(...await prepareAdvisories(options, environment)); saved.environment = environment; await writeFile(receiptPath, JSON.stringify(saved, null, 2), { mode: 0o600 }); }
         return { ...saved, environment };
       }
     }
   } catch { /* Missing/incomplete environments are prepared under the same boundary. */ }
   try {
-    const artifacts = [...new Map(locks.flatMap(text => product === 'openjob' ? npmArtifacts(text) : rubyArtifacts(text)).map(item => [`${item.algorithm}:${item.digest}`, item])).values()];
+    const artifacts = [...new Map(locks.flatMap(text => nodeProduct ? npmArtifacts(text) : rubyArtifacts(text)).map(item => [`${item.algorithm}:${item.digest}`, item])).values()];
     result.artifacts = artifacts.length;
     const copies: Array<{ source: string; destination: string }> = [];
     let next = 0;
@@ -291,7 +296,7 @@ async function prepare(options: Options): Promise<DependencyResult> {
       while (next < artifacts.length) {
         const artifact = artifacts[next++]; const fetched = await fetchArtifact(artifact, artifactsRoot, options.signal);
         if (fetched.downloaded) result.downloaded++; else result.reused++;
-        copies.push({ source: fetched.path, destination: product === 'openjob' ? cacheContent(join(paths.cacheRoot, 'npm'), artifact.algorithm, artifact.digest) : join(paths.cacheRoot, 'gem-cache', artifact.filename!) });
+        copies.push({ source: fetched.path, destination: nodeProduct ? cacheContent(join(paths.cacheRoot, 'npm'), artifact.algorithm, artifact.digest) : join(paths.cacheRoot, 'gem-cache', artifact.filename!) });
       }
     }));
     const failed = downloads.find(result => result.status === 'rejected');
@@ -302,8 +307,9 @@ async function prepare(options: Options): Promise<DependencyResult> {
       command: [process.execPath, '-e', 'const fs=require("fs"),path=require("path");for(const i of JSON.parse(fs.readFileSync(process.argv[1],"utf8"))){fs.mkdirSync(path.dirname(i.destination),{recursive:true});fs.copyFileSync(i.source,i.destination)}', manifestPath] });
     result.checks.push({ command: 'Import verified public dependency artifacts inside native sandbox', ...imported });
     if (imported.code !== 0) throw new Error('Sandbox dependency cache import failed');
-    const commands = product === 'openjob' ? [['node', '--version'], ['npm', 'ci', '--offline', '--include=dev', '--no-audit', '--no-fund']]
-      : product === 'palettewow' ? [['ruby', '--version'], ['bundle', '--version'], ['bundle', 'install', '--local', '--jobs=4'], ['bundle', 'check']] : [];
+    const commands = nodeProduct ? [['node', '--version'], ['npm', 'ci', '--offline', '--include=dev', '--no-audit', '--no-fund']]
+      : product === 'ruby' ? [['ruby', '--version'], ['bundle', '--version'], ['bundle', 'install', '--local', '--jobs=4'], ['bundle', 'check']] : [];
+    if(product==='node-native')commands.push(['npm','--prefix','native','ci','--offline','--include=dev','--no-audit','--no-fund']);
     for (const command of commands) {
       const check = await executeSandboxed({ workspace: paths.workspace, dataRoot: options.dataRoot, signal: options.signal, toolEnvironment: environment, command, timeoutMs: 20 * 60 * 1000 });
       result.checks.push({ command: command.join(' '), ...check });
@@ -311,7 +317,7 @@ async function prepare(options: Options): Promise<DependencyResult> {
       // Bundler's exact frozen-definition failure occurs only after verified
       // artifact import and successful Ruby/Bundler checks. It permits editing
       // dependency files, never an installed environment or canonical success.
-      if (product === 'palettewow' && command.join(' ') === 'bundle install --local --jobs=4' && check.code === 16
+      if (product === 'ruby' && command.join(' ') === 'bundle install --local --jobs=4' && check.code === 16
         && ["The dependencies in your gemfile changed, but the lockfile can't be updated\nbecause frozen mode is set\n",
           "Some dependencies were deleted from your gemfile, but the lockfile can't be\nupdated because frozen mode is set\n"].some(prefix => check.stderr.startsWith(prefix))) {
         result.repair = { kind: 'bundler_frozen_lock_mismatch', command: command.join(' '), code: 16,
@@ -319,11 +325,11 @@ async function prepare(options: Options): Promise<DependencyResult> {
       }
       if (check.code !== 0) throw new Error(`Dependency preparation failed: ${command.join(' ')}`);
     }
-    if (product === 'openjob') {
+    if (product === 'node-native') {
       const browsers = await prepareBrowsers(options, environment, paths.stateRoot, artifactsRoot); result.checks.push(...browsers);
       if (browsers.some(check => check.code)) throw new Error('Browser artifact preparation failed');
     }
-    if (product === 'palettewow') result.checks.push(...await prepareAdvisories(options, environment));
+    if (product === 'ruby') result.checks.push(...await prepareAdvisories(options, environment));
     result.installed = true;
   } catch (error) {
     result.checks.push({ command: 'Dependency preparation', code: 1, stdout: '', stderr: error instanceof Error ? error.message : String(error) });

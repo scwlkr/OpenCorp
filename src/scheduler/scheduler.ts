@@ -348,7 +348,7 @@ export class Scheduler {
    let toolEnvironment:ToolEnvironment|undefined,dependencyRepair='';
    if(assignment.projectId&&['implementation','review'].includes(assignment.kind)){
     const currentAssignment=this.store.need('assignments',assignment.id),project=currentAssignment.pullRequestCandidate||currentAssignment.payload?.artifactId&&this.store.get('artifacts',currentAssignment.payload.artifactId)?.reviewWorkspace?this.broker.workspaces.forAssignment(currentAssignment):this.store.need('projects',assignment.projectId);
-    if(project.productId&&this.store.need('products',project.productId).kind!=='internal-tool'){
+    if(project.productId){
      const product=this.store.need('products',project.productId);this.store.emit('dependencies.started',{runId:run.id,productId:product.id});
      const prepared=await prepareProductDependencies({productName:product.name,workspace:run.workspace!,dataRoot:this.store.dataRoot,signal:controller.signal});
      this.store.update('runs',run.id,{dependencyPreparation:{installed:prepared.installed,lockDigest:prepared.lockDigest,receiptPath:prepared.receiptPath,downloaded:prepared.downloaded,reused:prepared.reused,incrementalCost:prepared.incrementalCost,...(prepared.repair?{repair:prepared.repair}:{})}});

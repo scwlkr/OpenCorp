@@ -1,16 +1,17 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, renameSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync, renameSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CompanyStore } from '../src/storage/store.js';
 import { WorkspaceManager } from '../src/tools/workspaces.js';
+import * as dependencies from '../src/tools/dependencies.js';
 import { InternalToolManager } from '../src/tools/internal-tools.js';
 import { executeSandboxed } from '../src/runtime/index.js';
 import type { Actor, Project } from '../src/core/types.js';
 vi.mock('../src/runtime/index.js',()=>({executeSandboxed:vi.fn(async()=>({code:0,stdout:'useful result',stderr:''}))}));
 let root:string,store:CompanyStore,workspaces:WorkspaceManager,tools:InternalToolManager,project:Project,artifactId:string,actor:Actor;
 beforeEach(async()=>{
- root=mkdtempSync(join(tmpdir(),'opencorp-tool-'));store=new CompanyStore(root);store.bootstrap();store.update('company',store.company.id,{state:'running'});workspaces=new WorkspaceManager(store,root);tools=new InternalToolManager(store,root,workspaces);
+ root=realpathSync(mkdtempSync(join(tmpdir(),'opencorp-tool-')));store=new CompanyStore(root);store.bootstrap();store.update('company',store.company.id,{state:'running'});workspaces=new WorkspaceManager(store,root);tools=new InternalToolManager(store,root,workspaces);
  const employees=store.list('employees'),author=employees[0]!,consumer=employees[1]!;
  const product=store.put('products',{id:'helper',name:'Helper',kind:'internal-tool',managerId:consumer.id,repository:join(root,'repositories','helper.git')});await workspaces.inspect(product);
  project=await workspaces.ensure(store.put('projects',{name:'Helper',productId:product.id,supervisorId:consumer.id}));
@@ -56,4 +57,10 @@ test('rejects repository symlink substitution before executing adopted software'
 test('rechecks adoption authority after asynchronous source inspection',async()=>{
  const original=workspaces.git.bind(workspaces);vi.spyOn(workspaces,'git').mockImplementation(async(project,args,options)=>{const result=await original(project,args,options);if(args[0]==='ls-tree')store.update('products','helper',{managerId:store.list('employees')[0]!.id});return result;});
  await expect(tools.adopt(actor,{artifactId,entrypoint:'helper.mjs',employeeIds:[(actor as any).employeeId]})).rejects.toThrow(/home manager/);expect(store.need('products','helper').adoption).toBeUndefined();
+});
+
+test('adopted npm software uses the runtime that prepared its dependencies',async()=>{
+ await tools.adopt({kind:'owner'},{artifactId,entrypoint:'helper.mjs',employeeIds:[(actor as any).employeeId]});
+ const preparation=vi.spyOn(dependencies,'prepareProductDependencies').mockResolvedValue({workspace:'isolated',productName:'Helper',lockDigest:'synthetic',environment:{binPaths:['/synthetic/prepared-node/bin'],readPaths:[],writePaths:[],variables:{}},installed:true,checks:[],receiptPath:'synthetic',artifacts:0,downloaded:0,reused:0,incrementalCost:0});
+ try{await tools.execute(actor,{productId:'helper',args:['literal; argument']});expect(vi.mocked(executeSandboxed).mock.calls[0][0]).toMatchObject({command:['node','helper.mjs','literal; argument'],toolEnvironment:{binPaths:['/synthetic/prepared-node/bin']}});}finally{preparation.mockRestore();}
 });

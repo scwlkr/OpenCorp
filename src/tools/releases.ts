@@ -1,6 +1,7 @@
+import { prepareProductDependencies } from './dependencies.js';
 import {deliveryFor} from '../core/delivery.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, copyFileSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { CompanyStore } from '../storage/store.js';
 import { DomainError, type Actor, type Artifact } from '../core/types.js';
@@ -37,11 +38,6 @@ export class ProductReleases {
     const project = this.store.need('projects', assignment.projectId!); const artifact = this.store.need('artifacts', artifactId);
     if (!project.productId || artifact.projectId !== project.id || artifact.kind !== 'commit') throw new DomainError('release_scope', 'Release source must be a commit artifact in this assignment project.', 403);
     const product = this.store.need('products', project.productId);
-    if (product.name !== 'WalkLang') {
-      const detail = product.name === 'OpenJob' ? 'OpenJob store/native release requires product-specific simulator, provider and physical-device readiness; no generic store submission is available.' : 'Deployment requires a registered product-specific procedure and confirmed zero incremental provider charge.';
-      if (!this.store.list('attention').some((item) => item.kind === 'release' && item.productId === product.id && item.status === 'open')) this.store.put('attention', { kind: 'release', productId: product.id, title: `${product.name} release prerequisite`, detail, requiredAction: 'Supply only the actual missing provider/device prerequisite after leadership prepares a release candidate.', status: 'open' });
-      throw new DomainError('release_channel_unavailable', detail, 409);
-    }
     if (!commitPattern.test(artifact.identity) || !this.store.hasApprovedArtifact(artifact.assignmentId, artifact.identity) || !artifact.checks.length || artifact.checks.some((check: any) => check.status !== 'passed' || check.source !== 'canonical-verifier' || check.identity !== artifact.identity)) throw new DomainError('review_required', 'Independent review and canonical verifier receipts for the exact source commit are required.', 403);
     if (!product.binding?.repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(product.binding.repository)) throw new DomainError('not_connected', 'Refresh the product GitHub binding first.', 409);
     const delivery=deliveryFor(project,artifact.id);
@@ -101,7 +97,7 @@ export class ProductReleases {
       const eligibility = await this.eligibility(actor, scoped);
       const id = randomUUID(), workspace = join(this.store.dataRoot, 'workspaces', `release-${id}`), root = join(this.store.dataRoot, 'releases', id);
       mkdirSync(join(this.store.dataRoot, 'workspaces'), { recursive: true }); mkdirSync(root, { recursive: true, mode: 0o700 });
-      release = this.store.put('artifacts', { id, kind: 'release-package', assignmentId: scoped.run.assignmentId, employeeId: scoped.run.employeeId, runId: scoped.run.id, projectId: scoped.project.id, productId: scoped.product.id, sourceArtifactId: scoped.artifact.id, sourceCommit: eligibility.sourceCommit, sourceTree: eligibility.sourceTree, identity: eligibility.sourceCommit, repository: scoped.repo, version: input.version, notes: input.notes, summary: `WalkLang ${input.version} release package`, uri: join(root, 'manifest.json'), assets: [], checks: [], releaseState: 'building', workspace, supersedes: prior?.id ?? null }) as ReleasePackage;
+      release = this.store.put('artifacts', { id, kind: 'release-package', assignmentId: scoped.run.assignmentId, employeeId: scoped.run.employeeId, runId: scoped.run.id, projectId: scoped.project.id, productId: scoped.product.id, sourceArtifactId: scoped.artifact.id, sourceCommit: eligibility.sourceCommit, sourceTree: eligibility.sourceTree, identity: eligibility.sourceCommit, repository: scoped.repo, version: input.version, notes: input.notes, summary: `${scoped.product.name} ${input.version} release package`, uri: join(root, 'manifest.json'), assets: [], checks: [], releaseState: 'building', workspace, supersedes: prior?.id ?? null }) as ReleasePackage;
       this.store.validateActor(actor, true);
       await this.run('git', ['--git-dir', eligibility.mirror, '-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '--detach', workspace, eligibility.sourceCommit], { env: { ...brokerEnvironment(), GIT_CONFIG_GLOBAL: '/dev/null' } });
       const gitDir = await this.run('git', ['-C', workspace, 'rev-parse', '--absolute-git-dir']);
@@ -109,17 +105,30 @@ export class ProductReleases {
       const host = process.platform === 'darwin' ? 'darwin' : process.platform === 'linux' ? 'linux' : undefined;
       const arch = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'amd64' : undefined;
       if (!host || !arch) throw new DomainError('release_host_unavailable', 'Existing release procedure requires a supported native build host.', 409);
-      const binary = `walk-${input.version}-${host}-${arch}`, expected = [binary, `walk-runtime-${input.version}.tar.gz`, `walktop-${input.version}-${host}-${arch}`];
-      const command = `export WALK_VERSION=${quote(input.version)}; make clean && make -j4 walk test && make conformance && WALK_BIN="$PWD/build/walk" scripts/stress-compatibility.sh && scripts/check-docs-site.sh && scripts/release.sh "$WALK_VERSION" "$PWD/.opencorp-release-output" && test "$("$PWD/.opencorp-release-output/${binary}" --version)" = "$WALK_VERSION" && NO_COLOR=1 "$PWD/.opencorp-release-output/walktop-${input.version}-${host}-${arch}" --once --fixture tools/walktop/testdata/basic && tar -tzf "$PWD/.opencorp-release-output/walk-runtime-${input.version}.tar.gz" >/dev/null`;
+      const binary = `walk-${input.version}-${host}-${arch}`, legacyAssets = [binary, `walk-runtime-${input.version}.tar.gz`, `walktop-${input.version}-${host}-${arch}`];
+      const legacyCommand = `export WALK_VERSION=${quote(input.version)}; make clean && make -j4 walk test && make conformance && WALK_BIN="$PWD/build/walk" scripts/stress-compatibility.sh && scripts/check-docs-site.sh && scripts/release.sh "$WALK_VERSION" "$PWD/.opencorp-release-output" && test "$("$PWD/.opencorp-release-output/${binary}" --version)" = "$WALK_VERSION" && NO_COLOR=1 "$PWD/.opencorp-release-output/walktop-${input.version}-${host}-${arch}" --once --fixture tools/walktop/testdata/basic && tar -tzf "$PWD/.opencorp-release-output/walk-runtime-${input.version}.tar.gz" >/dev/null`;
+      let command=legacyCommand,expected=legacyAssets;
+      let toolEnvironment;
+      const configured=existsSync(join(workspace,'.opencorp/product.json'));
+      if(!configured&&scoped.product.name!=='WalkLang')throw new DomainError('release_channel_unavailable','Reviewed .opencorp/product.json must configure the release procedure.',409);
+      if(configured) {
+        const raw=await this.workspaces.readBlob(eligibility.mirror,eligibility.sourceCommit,'.opencorp/product.json');
+        const config=JSON.parse(raw).release;
+        if(config?.target!=='github-release'||typeof config.command!=='string'||!config.command.trim()||config.command.length>4000||config.command.includes('\0')||!Array.isArray(config.assets)||!config.assets.length||config.assets.length>32||config.assets.some((name:unknown)=>typeof name!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)||name==='SHA256SUMS')||new Set(config.assets).size!==config.assets.length)throw new DomainError('release_channel_unavailable','Reviewed .opencorp/product.json must configure a github-release command and distinct flat asset names.',409);
+        command=`export OPENCORP_RELEASE_VERSION=${quote(input.version)}; ${config.command}`;expected=config.assets;
+        const prepared=await prepareProductDependencies({productName:scoped.product.name,workspace,dataRoot:this.store.dataRoot,signal:controller.signal});
+        if(!prepared.installed)throw new DomainError('release_dependencies','Release dependency preparation failed.',409);
+        toolEnvironment=prepared.environment;
+      }
       this.store.validateActor(actor, true);
-      const result = await this.sandbox({ workspace, command, runId: `release-${id}`, dataRoot: this.store.dataRoot, timeoutMs: 30 * 60_000, signal: controller.signal });
+      const result = await this.sandbox({ workspace, command, toolEnvironment, runId: `release-${id}`, dataRoot: this.store.dataRoot, timeoutMs: 30 * 60_000, signal: controller.signal });
       writeFileSync(join(root, 'build.log'), redact(`${result.stdout}\n${result.stderr}`), { mode: 0o600 });
       if (result.code !== 0 || controller.signal.aborted) throw new DomainError('release_build_failed', `Release build/checks failed (${result.code}); inspect ${join(root, 'build.log')}.`, 409);
       this.store.validateActor(actor, true);
       if (await this.workspaces.head(buildProject) !== eligibility.sourceCommit || (await this.workspaces.git(buildProject, ['status', '--porcelain', '--untracked-files=no']))) throw new DomainError('release_source_changed', 'Packaging modified tracked source; release rejected.', 409);
       const output = safeChild(workspace, join(workspace, '.opencorp-release-output'));
       const actualNames = readdirSync(output).sort(); const names = [...expected, 'SHA256SUMS'].sort();
-      if (JSON.stringify(actualNames) !== JSON.stringify(names)) throw new DomainError('release_assets_invalid', 'Existing release procedure did not produce exactly the expected host binaries, runtime archive, and checksums.', 409);
+      if (JSON.stringify(actualNames) !== JSON.stringify(names)) throw new DomainError('release_assets_invalid', 'Existing release procedure did not produce exactly the configured assets and checksums.', 409);
       const checksums = readFileSync(safeChild(output, join(output, 'SHA256SUMS')), 'utf8').trim().split('\n');
       const spool = join(root, 'assets'); mkdirSync(spool, { mode: 0o700 }); const assets: ReleaseAsset[] = [];
       for (const name of names) {

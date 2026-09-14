@@ -936,7 +936,7 @@ it.each(['internal implementation','external implementation','internal managemen
  if(!scenario.startsWith('internal'))store.update('products',product.id,{kind:'external'});
  const execute=vi.fn(async(_request:any)=>{throw new Error('Fixture ends at runtime dispatch');}),broker=new CorporateBroker(store,root);
  const scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,broker,'http://localhost');
- if(scenario==='external implementation'){const dependencies=await import('../src/tools/dependencies.js');vi.spyOn(dependencies,'prepareProductDependencies').mockResolvedValue({installed:true,lockDigest:'fixture',receiptPath:'fixture',downloaded:0,reused:0,incrementalCost:0,environment:{}} as any);}
+ {const dependencies=await import('../src/tools/dependencies.js');vi.spyOn(dependencies,'prepareProductDependencies').mockResolvedValue({installed:true,lockDigest:'fixture',receiptPath:'fixture',downloaded:0,reused:0,incrementalCost:0,environment:{}} as any);}
  await (scheduler as any).execute(run);
  expect(execute).toHaveBeenCalledOnce();const request=execute.mock.calls[0][0];expect(request.system.includes('This company-owned internal-tool repository may start empty.')).toBe(scenario==='internal implementation');
  if(scenario==='internal implementation'){expect(request.system).toContain('Preserve and reuse any existing files');expect(request.system).toContain('manager-defined implementation');expect(request.system).toContain('bare repository is Git storage');expect(request.system).toContain('Product implementations require commit_work');}
