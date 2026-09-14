@@ -72,8 +72,8 @@ beforeEach(() => {
     if (endpoint.includes('/commits/')) return JSON.stringify({ sha: merged });
     if (endpoint.includes('/compare/')) return JSON.stringify({ status: 'identical' });
     if (endpoint.includes('/git/ref/')) { if (!tag) throw new Error('gh: Not Found (HTTP 404)'); return JSON.stringify(tag); }
-    if (endpoint.includes('/assets?')) return JSON.stringify([assets]);
-    if (endpoint.includes('/releases?')) return JSON.stringify([remote ? [remote] : []]);
+    if (endpoint.includes('/assets?')) return JSON.stringify({ count: assets.length, items: assets });
+    if (endpoint.includes('/releases?')) return JSON.stringify({ count: remote ? 1 : 0, items: remote ? [remote] : [] });
     throw new Error(`Unexpected request ${args.join(' ')}`);
   };
   const workspaces = { head: async () => merged, git: async () => '' } as unknown as WorkspaceManager;
@@ -101,6 +101,22 @@ describe('controlled product release pipeline', () => {
     const release = await prepare(); loseAssetResponse = true; await expect(adapter.publish(actor, { releaseId: release.id })).rejects.toThrow(/requires provider reconciliation/); expect(assets).toHaveLength(1);
     expect(store.list('actions').some((action) => action.status === 'uncertain')).toBe(true);
     await adapter.publish(actor, { releaseId: release.id }); expect(assets).toHaveLength(4); expect(writes.filter((write) => write.includes('uploads.github.com'))).toHaveLength(4);
+  });
+  it('finds a retained draft beyond a large release history without duplicating publication', async () => {
+    const release = await prepare(); loseAssetResponse = true;
+    await expect(adapter.publish(actor, { releaseId: release.id })).rejects.toThrow();
+    const existing = run;
+    const paged: typeof checked = async (file, args, options) => {
+      const endpoint = args.find(part => part.includes('/releases?'));
+      if (!endpoint) return existing(file, args, options);
+      if (args.includes('--paginate') || !args.includes('--jq')) throw new Error('Release history exceeds capture limit');
+      const page = Number(new URL(`https://api.github.com/${endpoint}`).searchParams.get('page'));
+      return JSON.stringify(page === 1 ? { count: 100, items: [] } : { count: 1, items: [remote] });
+    };
+    adapter = new ProductReleases(store, adapter.workspaces, { run: paged, sandbox });
+    expect((await adapter.publish(actor, { releaseId: release.id })).releaseState).toBe('published');
+    expect(writes.filter(write => write === 'POST repos/test-owner/WalkLang/releases')).toHaveLength(1);
+    expect(writes.filter(write => write.includes('uploads.github.com'))).toHaveLength(4);
   });
   it('retries only once after conclusive absence and retains repeated uncertainty', async () => {
     const release = await prepare(); failBeforeTag = true;

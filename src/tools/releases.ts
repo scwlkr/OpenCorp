@@ -48,7 +48,15 @@ export class ProductReleases {
     try { return JSON.parse(await this.run('gh', ['api', path])); }
     catch (error) { if (absent && error instanceof Error && /\(HTTP 404\)/.test(error.message)) return undefined; throw error; }
   }
-  private async pages(path: string): Promise<any[]> { const pages = JSON.parse(await this.run('gh', ['api', path, '--paginate', '--slurp'])); if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) throw new Error('Malformed GitHub pagination response'); return pages.flat(); }
+  private async pages(path: string, selection = '.'): Promise<any[]> {
+    const items: any[] = [];
+    for (let page = 1; ; page++) {
+      const result = JSON.parse(await this.run('gh', ['api', `${path}&page=${page}`, '--jq', `{count: length, items: ${selection}}`]));
+      if (!Number.isInteger(result.count) || result.count < 0 || result.count > 100 || !Array.isArray(result.items)) throw new Error('Malformed GitHub pagination response');
+      items.push(...result.items);
+      if (result.count < 100) return items;
+    }
+  }
   private async eligibility(actor: Actor, input: ReturnType<ProductReleases['scope']>) {
     const { repo, product, artifact, delivery } = input;
     const [account, current, pr] = await Promise.all([this.run('gh', ['api', 'user', '--jq', '.login']), this.json(`repos/${repo}`), this.json(`repos/${repo}/pulls/${delivery.prNumber}`)]);
@@ -204,7 +212,7 @@ export class ProductReleases {
     await this.effect(actor, release, scoped.artifact, 'tag', { version }, tagObservation, () => this.run('gh', ['api', '--method', 'POST', `repos/${repo}/git/refs`, '--input', '-'], { input: JSON.stringify({ ref: `refs/tags/${version}`, sha: release.sourceCommit }) }));
     const body = `${release.notes}\n\nBuilt locally for ${release.host} from ${release.sourceCommit}. SHA256SUMS accompanies the release assets.\n\n<!-- opencorp-release:${release.id}:${release.sourceCommit} -->`;
     const releaseObservation = async (): Promise<Observation> => {
-      const matches = (await this.pages(`repos/${repo}/releases?per_page=100`)).filter((item) => item.tag_name === version);
+      const matches = await this.pages(`repos/${repo}/releases?per_page=100`, `map(select(.tag_name == ${JSON.stringify(version)}))`);
       if (!matches.length) return undefined;
       const result = matches[0];
       if (matches.length !== 1 || result.body !== body || result.name !== version || result.prerelease !== version.includes('-')) throw new DomainError('release_metadata_conflict', 'Existing release metadata is not this intended release; no overwrite.', 409);
