@@ -310,8 +310,10 @@ Record the next accountable action with company_command {command:{type:"responsi
   const reviewAvailable=commands.some((command:string)=>['recruitment.approve','recruitment.reject'].includes(command));
   const retryFault=actor.kind==='employee'?this.store.faultContext(actor.runId):undefined;
   const tools=scoped.filter(tool=>tool.name==='revise_and_retry_assignment'?retryFault?.diagnosis.status==='running'&&retryFault.assignment.status==='blocked':tool.name==='review_candidate'?reviewAvailable:!direct[tool.name]||commands.includes(direct[tool.name]));
+  if(this.context(actor).assignment.kind!=='conversation'){
   if(reviewAvailable&&!tools.some(tool=>tool.name==='review_candidate'))tools.push(brokerTools.find(tool=>tool.name==='review_candidate')!);
   for(const [name,command] of Object.entries(direct))if(commands.includes(command)&&!tools.some(tool=>tool.name===name))tools.push(brokerTools.find(tool=>tool.name===name)!);
+  }
   return tools.map(tool=>{
    if(tool.name!=='company_command')return tool;
    const branches=tool.inputSchema.properties.command.anyOf;
@@ -361,6 +363,7 @@ Record the next accountable action with company_command {command:{type:"responsi
  }
  private scopedToolsFor(actor:Actor){
   this.store.validateActor(actor);const {assignment}=this.context(actor);
+  if(assignment.kind==='conversation'){const names=new Set(['company_read','company_detail','company_help','company_command','knowledge_search','send_message','create_assignment','repo_inspect','repo_read','repo_pr','repo_issue','fetch_public']);return brokerTools.filter(tool=>names.has(tool.name));}
   if(this.initialVotePending(actor,assignment)){const names=new Set(['vote_decision','company_help','company_read','company_detail','knowledge_search','repo_inspect','repo_read','repo_pr','repo_issue','fetch_public','browser','inspect_artifact']);return brokerTools.filter(tool=>names.has(tool.name));}
   const fault=actor.kind==='employee'&&this.store.faultContext(actor.runId);
   const original=assignment.payload?.acceptanceAssignmentId?this.store.get('assignments',assignment.payload.acceptanceAssignmentId):undefined;
