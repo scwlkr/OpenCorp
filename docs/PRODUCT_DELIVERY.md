@@ -33,6 +33,12 @@ For an internal release, `adopt_internal_tool {artifactId, entrypoint, employeeI
 
 Have an intended employee use the adopted tool for a real task, or an intended human install/use the public release. Inspect the actual output and act on feedback. Preserve attribution to employee implementation and review; development-assistant fixtures are only checks.
 
+## Reach users and improve from use
+
+Choose a reachable audience with a concrete task. Reuse relevant research, marketing and support skills with existing repository, browser, messaging or connected tools within their granted authority. For internal tools, provide the useful entrypoint and limitations to the responsible colleague; for public products, use an authorized channel appropriate to the audience. Drafting publicity is not distribution, and distribution is not adoption.
+
+Observe what work the user actually accomplished and where the product got in the way. Ordinary colleague feedback, a support issue or a relevant usage observation is enough to guide judgment. Reference the source in existing assignment or knowledge records, implement a useful response, independently review and release it, then inspect the changed workflow. Do not add mandatory forms, telemetry, scores or audience thresholds. Preserve failures and disclose assistance; a smoke check, synthetic traffic or a release receipt cannot establish useful adoption.
+
 ## Availability without company execution
 
 Prefer a configured independent target suited to the product: public GitHub releases for installable software, or an existing hosted deployment for a web workflow. GitHub Pages can serve static documentation through the repository's established workflow; it cannot host an application server. Inspect the actual target, current free eligibility, connected identity and deployment result. Never substitute a Mac tunnel or local preview for independent hosting.
