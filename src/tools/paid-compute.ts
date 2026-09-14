@@ -33,13 +33,13 @@ function bound(route:ComputeRoute,maxOutput:number){
 /** Supplemental text inference through the existing broker; employee identity and default engine persist. */
 export async function paidCompute(store:CompanyStore,actor:Actor,args:any,signal:AbortSignal,readAccess:ComputeAccessReader=computeAccess(store.dataRoot),transport:typeof fetch=fetch){
  if(typeof args.prompt!=='string'||!args.prompt.trim()||args.prompt.length>100000||typeof args.dedupeKey!=='string'||!args.dedupeKey.trim()||args.dedupeKey.length>200)throw new DomainError('invalid_compute','Supply bounded text and a stable request key.');
- assertComputeGrant(store,actor,args.proposalId,args.provider,args.model);
+ assertComputeGrant(store,actor,args.proposalId,args.provider,args.model,args.maxOutputTokens??1024);
  const {route,apiKey}=readAccess(args.provider,args.model);
  if(route.provider!==args.provider||route.model!==args.model)throw new DomainError('compute_unbounded','Configured route differs from requested route.',403);
  const maxOutput=args.maxOutputTokens??1024;
  const body={model:route.model,messages:[{role:'user',content:args.prompt}],max_completion_tokens:maxOutput,n:1,stream:false,store:false,service_tier:'default'};
  signal.throwIfAborted();
- const {action,reused}=reserveCompute(store,actor,{proposalId:args.proposalId,provider:route.provider,model:route.model,dedupeKey:args.dedupeKey,promptHash:createHash('sha256').update(JSON.stringify(body)).digest('hex'),maximumMicrousd:()=>bound(route,maxOutput),pricing:route});
+ const {action,reused}=reserveCompute(store,actor,{proposalId:args.proposalId,provider:route.provider,model:route.model,maxOutputTokens:maxOutput,dedupeKey:args.dedupeKey,promptHash:createHash('sha256').update(JSON.stringify(body)).digest('hex'),maximumMicrousd:()=>bound(route,maxOutput),pricing:route});
  if(reused)return {actionId:action.id,status:action.status,reused:true,result:action.result,reservedMicrousd:action.reservedMicrousd};
  try{
   // Nothing asynchronous separates reservation and dispatch; an ambiguous transport never releases allowance.

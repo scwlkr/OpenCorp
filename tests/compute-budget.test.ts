@@ -42,7 +42,7 @@ it('binds authenticated email approval to dispatch and prevents concurrent overc
  await expect(paidCompute(store,actor,args('first'),signal(),access,transport)).resolves.toMatchObject({reused:true});expect(transport).toHaveBeenCalledOnce();
  await expect(paidCompute(store,actor,{...args('first'),prompt:'Different work'},signal(),access,transport)).rejects.toThrow('different effect');
 });
-it.each(['expired','changed-work','wrong-route','private','paused','revoked','stale-policy'])('denies %s after approval without a transport call',async mode=>{
+it.each(['expired','changed-work','wrong-route','private','paused','revoked','stale-policy','output-scope'])('denies %s after approval without a transport call',async mode=>{
  await approve();const transport=vi.fn<typeof fetch>();
  if(mode==='expired')store.update('attention',proposal.id,{expiresAt:new Date(0).toISOString()});
  if(mode==='changed-work')store.update('assignments',work.id,{instructions:'Do something else'});
@@ -50,7 +50,7 @@ it.each(['expired','changed-work','wrong-route','private','paused','revoked','st
  if(mode==='paused')store.command(owner,{type:'control',action:'stop'});
  if(mode==='revoked')store.update('runs',actor.runId,{tokenRevoked:true});
  if(mode==='stale-policy')store.update('policy',store.policy.id,{revision:store.policy.revision+1});
- await expect(paidCompute(store,actor,{...args(mode),...(mode==='wrong-route'?{model:'gpt-4.1-2025-04-14'}:{})},signal(),access,transport)).rejects.toThrow();expect(transport).not.toHaveBeenCalled();
+ await expect(paidCompute(store,actor,{...args(mode),...(mode==='wrong-route'?{model:'gpt-4.1-2025-04-14'}:{}),...(mode==='output-scope'?{maxOutputTokens:2048}:{})},signal(),()=>({...access(),route:{...route(),maxOutputTokens:32768}}),transport)).rejects.toThrow();expect(transport).not.toHaveBeenCalled();
 });
 it('retains uncertain reservations and exact approval through database restart and older backup restore',async()=>{
  const backup=store.backup();await approve();const transport=vi.fn<typeof fetch>().mockRejectedValue(new Error('synthetic disconnected response'));
