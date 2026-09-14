@@ -1,3 +1,4 @@
+import { RunInspection } from '../src/runtime/inspection.js';
 import { fromJSONSchema } from 'zod';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -64,6 +65,13 @@ describe('typed management tools',()=>{
   const outcome=()=>managementOutcome(store,store.need('assignments',task.id),store.need('runs',actor.runId));
   return {manager,worker,project,original,failed,actor,task,outcome};
  }
+ it('lets responsible fault management adopt a skill lesson while preserving role authority',async()=>{
+  const {actor,original}=diagnosis(),employee=store.need('employees',original.employeeId);
+  expect(broker.toolsFor(actor).map(t=>t.name)).toContain('update_role');
+  await broker.call(actor,'update_role',{employeeId:employee.id,content:employee.role+'\nUse retained results before retrying.',source:actor.runId,rationale:'Observed repeated recovery failure'});
+  expect(store.need('employees',employee.id).roleVersion).toBe(employee.roleVersion+1);
+  await expect(broker.call(actor,'update_role',{employeeId:ceo.id,content:'Unauthorized revision',source:actor.runId,rationale:'Not a managed employee'})).rejects.toMatchObject({code:'forbidden'});
+ });
  it('keeps inline diagnosis knowledge linked and authorized without changing normal or explicit reads',async()=>{
   const {actor,original,failed}=diagnosis();
   const linked=store.command(owner,{type:'knowledge.write',scope:'company',content:'LINKED_FAILURE_FINDING',source:`Observed failed run ${failed.id}`});
@@ -109,7 +117,7 @@ describe('typed management tools',()=>{
  it('scopes trusted fault recovery and initial evidence without removing full authorized reads',async()=>{
   const {actor,original,failed,worker,project}=diagnosis();
   const names=(await disclosedTools(actor)).map(tool=>tool.name),schema=(await disclosedTools(actor)).find(t=>t.name==='company_command')!.inputSchema.properties.command;
-  expect(schema.anyOf.map((b:any)=>b.properties.type.enum[0]).sort()).toEqual(['employee.model','assignment.update','assignment.create','decision.create','responsibility.update','owner.request','message.send'].sort());
+  expect(schema.anyOf.map((b:any)=>b.properties.type.enum[0]).sort()).toEqual(['role.update','employee.model','assignment.update','assignment.create','decision.create','responsibility.update','owner.request','message.send'].sort());
   for(const name of ['record_blocked_diagnosis','create_assignment','company_read','company_detail','knowledge_search','repo_read','repo_pr','repo_issue','inspect_artifact','fetch_public','browser','skill_discover','skill_import','skill_read'])expect(names).toContain(name);
   for(const name of ['communicate','propose_executive','vote_decision','commit_work','deliver_product','publish_release'])expect(names).not.toContain(name);
   const help=await broker.call(actor,'company_help',{});expect(help).toContain(original.id);expect(help).toContain(failed.id);expect(help).toContain('actual current-run model or instruction change');expect(help.length).toBeLessThan(3000);
@@ -1512,4 +1520,30 @@ it('withholds Owner proposal decisions and unassigned email replies from hosted 
  const actor=actorFor(ceo);store.update('runs',actor.runId,{modelId:'synthetic-hosted-route'});
  for(const [collection,id] of [['attention',proposal.id],['messages',proposal.messageId],['messages',incoming.id]])await expect(broker.call(actor,'company_detail',{collection,id})).rejects.toThrow();
  store.update('runs',actor.runId,{modelId:model});expect(JSON.stringify(await broker.call(actor,'company_detail',{collection:'attention',id:proposal.id}))).toContain('SYNTHETIC_PRIVATE_PROPOSAL');
+});
+
+it('serves bounded shared inspection to local home management without exposing it through project or hosted access',async()=>{
+ const manager=hire('Diagnostic manager'),worker=hire('Diagnostic worker',manager.id,'worker'),peer=hire('Project peer',ceo.id,'worker');
+ const project=store.command(owner,{type:'project.create',name:'Shared diagnostic project',outcome:'Recover useful work',acceptance:['Useful result'],supervisorId:manager.id,rationale:'Concrete recovery'});
+ const subject=actorFor(worker,project),managing=actorFor(manager),projectPeer=actorFor(peer,project);
+ const capture=new RunInspection(root,subject.runId,['synthetic-inspection-secret']);
+ capture.record('tool.started',{name:'repo_read',input:'synthetic-inspection-secret',context:'x'.repeat(10000)});
+ capture.record('runtime.tool',{tool:'corporate_repo_read',state:{status:'completed',output:'retained useful result'}});
+ const args={collection:'runs',id:subject.runId,view:'inspection',offset:0};
+ const index=await broker.call(managing,'company_detail',args);
+ expect(JSON.parse(index.content).map((e:any)=>e.eventIndex)).toEqual([1,0]);
+ expect(JSON.parse(index.content)[0]).toMatchObject({tool:'corporate_repo_read',status:'completed'});
+ const first=await broker.call(managing,'company_detail',{...args,eventIndex:0});
+ expect(first.available).toBe(true);expect(first.content.length).toBeLessThanOrEqual(8000);expect(first.content).not.toContain('synthetic-inspection-secret');
+ const next=await broker.call(managing,'company_detail',{...args,eventIndex:0,offset:first.nextOffset});
+ expect(next.content).toContain('xxx');
+ expect((await broker.call(managing,'company_detail',{...args,eventIndex:1})).content).toContain('retained useful result');
+ await expect(broker.call(managing,'company_detail',{...args,eventIndex:2})).rejects.toMatchObject({code:'inspection_event'});
+ expect((await broker.call(subject,'company_detail',args)).available).toBe(true);
+ expect((await broker.call(projectPeer,'company_detail',{...args,view:'record'})).record.id).toBe(subject.runId);
+ await expect(broker.call(projectPeer,'company_detail',args)).rejects.toMatchObject({code:'inspection_forbidden'});
+ store.update('runs',managing.runId,{modelId:'hosted-fixture'});
+ await expect(broker.call(managing,'company_detail',args)).rejects.toMatchObject({code:'inspection_forbidden'});
+ const outsider=actorFor(hire('Unrelated worker',ceo.id,'worker'));
+ await expect(broker.call(outsider,'company_detail',args)).rejects.toMatchObject({code:'evidence_forbidden'});
 });

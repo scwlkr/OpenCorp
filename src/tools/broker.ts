@@ -1,3 +1,4 @@
+import { readInspection } from '../runtime/inspection.js';
 import { paidCompute } from './paid-compute.js';
 import { permittedDirectFreeModel, permittedOpenRouterFreeModel, productiveSharingAllowed } from '../core/inference-policy.js';
 import { candidateMembers } from '../core/organization.js';
@@ -77,7 +78,7 @@ Direct tools take direct arguments. Generic corporate commands put fields inside
 export const initialVoteGuide=`Read the assigned decision with company_detail, including its payload and derived appointmentEffect when present. Inspect relevant retained company, role, source, product, and outcome evidence needed for your judgment. Source depth remains your responsibility; use detail pages and repository reads as needed.
 Record your own independent initial judgment with vote_decision {decisionId:ASSIGNED_DECISION_ID,approve:YOUR_BOOLEAN,rationale:YOUR_EVIDENCE_BASED_REASON}. Supply direct fields, no command or payload wrapper. Choose the actual boolean yourself; no default vote or invented acceptance criteria. Peer initial judgments remain hidden until your own vote is recorded. Your initial vote is immutable.
 After the vote receipt, briefly summarize your independent rationale and end this assignment. This task does not authorize appointment, hiring, product publication, or speaking for another Elder.`;
-const recoveryCommands=new Set(['employee.model','assignment.update','assignment.create','decision.create','responsibility.update','owner.request','message.send']);
+const recoveryCommands=new Set(['role.update','employee.model','assignment.update','assignment.create','decision.create','responsibility.update','owner.request','message.send']);
 const departmentFormationCommands=new Set(['department.create','department.update','position.create','position.update','responsibility.update','owner.request']);
 const executiveProposalCommands=new Set(['position.create','decision.create','responsibility.update','owner.request']);
 
@@ -176,7 +177,7 @@ export const brokerTools=[
  {name:'use_internal_tool',description:'Run an adopted local tool in an isolated workspace with no network or credentials. Records actual result and version.',inputSchema:objectSchema({productId:string,args:{type:'array',items:string}},['productId'])},
  {name:'rollback_internal_tool',description:'Restore a previously adopted reviewed local-tool version.',inputSchema:objectSchema({productId:string,identity:string},['productId','identity'])},
  {name:'company_read',description:'Scoped pages; follow nextCall.',inputSchema:objectSchema({collection:{type:'string',enum:['summary',...readCollections],description:'Overview: omit or summary.'},query:{type:'string',minLength:1,maxLength:200,description:'Employees only: name/title substring, case-insensitive.'},kind:{type:'string',minLength:1,description:'Experience kind only; omit for other collections.'},channelId:{type:'string',minLength:1,description:'Messages only: exact workplace channel.'},...pageFields})},
- {name:'company_detail',description:'Evidence pages (8000 chars). Artifact record=metadata; verification=scoped canonical output, including failures. Follow nextCall. Not independent review.',inputSchema:objectSchema({collection:{type:'string',enum:detailCollections},id:string,view:{type:'string',enum:['content','record','verification']},offset:{type:'integer',minimum:0},receiptId:{type:'string',description:'Use the returned receiptId when continuing verification output at a nonzero offset; changed receipts require restarting at 0.'}},['collection','id'])},
+ {name:'company_detail',description:'Evidence pages (8000 chars). Run inspection=captured events; artifact record=metadata, verification=check output. Not independent review.',inputSchema:objectSchema({collection:{type:'string',enum:detailCollections},id:string,view:{type:'string',enum:['content','record','verification','inspection']},offset:{type:'integer',minimum:0},eventIndex:{type:'integer',minimum:0},receiptId:{type:'string',description:'Continue verification with returned receiptId; changed receipts restart at 0.'}},['collection','id'])},
  {name:'knowledge_search',description:'Search actual source-linked narrative contents within company, project and home-management scopes. Use company_detail for a full selected note.',inputSchema:objectSchema({query:string,limit:{type:'integer',minimum:1,maximum:30}},['query'])},
  {name:'create_workplace_event',description:'Schedule your event; backend controls activation.',inputSchema:objectSchema(Object.fromEntries(['channelId','title','purpose','participantIds','scheduledAt','eventType','subjectEmployeeId','recurrence','durationMinutes','maxTurnsPerParticipant'].map(key=>[key,Object.fromEntries(Object.entries(commandProperties[key]).filter(([field])=>field!=='description'))])),['channelId','title','purpose','participantIds','scheduledAt'])},
  {name:'send_message',description:'Message a colleague; wake:false is informational. projectId is a project, not a requisition.',inputSchema:objectSchema({recipientId:{type:'string',minLength:1},content:{type:'string',minLength:1},projectId:{type:'string',minLength:1},wake:{type:'boolean'},channel:{type:'string',enum:['email']}},['recipientId','content'])},
@@ -372,7 +373,7 @@ Record the next accountable action with company_command {command:{type:"responsi
   const acceptance=assignment.kind==='management'&&assignment.projectId===null&&original&&assignment.payload.sourceProjectId===original.projectId&&assignment.schedulerKey?.startsWith(`acceptance:${original.id}:`);
   if(fault||acceptance||this.responsibilityContext(actor)){
    const names=new Set(['company_help','company_read','company_detail','company_command','create_assignment','knowledge_search','repo_inspect','repo_read','repo_pr','repo_issue','fetch_public','browser','inspect_artifact','skill_read','skill_discover','skill_import']);
-   if(fault){names.add('record_blocked_diagnosis');names.add('revise_and_retry_assignment');}
+   if(fault){names.add('record_blocked_diagnosis');names.add('revise_and_retry_assignment');names.add('update_role');}
    if(acceptance)names.add('finish_assignment');
    return brokerTools.filter(tool=>names.has(tool.name)).map(tool=>tool.name==='company_command'?{...tool,description:'Retain recovery, responsibility or acceptance decisions; preserve original acceptance and authority.',inputSchema:objectSchema({command:{...commandSchema,anyOf:commandSchema.anyOf.filter(branch=>recoveryCommands.has(branch.properties.type.enum[0]!))}},['command'])}:tool);
   }
@@ -630,6 +631,17 @@ Record the next accountable action with company_command {command:{type:"responsi
      const collection=detailCollections.find(name=>name!==args.collection&&(state as any)[name].some((r:any)=>r.id===args.id));
      if(collection)throw new DomainError('evidence_collection_mismatch',`This visible record belongs to ${collection}. Use company_detail ${JSON.stringify({collection,id:args.id})}. No record content was read.`);
      throw new DomainError('evidence_forbidden','Evidence is absent or outside this employee\'s authorized scope. Collection paging uses the same scope and cannot reveal this ID. Use available evidence, ask the responsible employee for the needed result, or retain the missing prerequisite; do not scan collections for this denied ID.',403);
+    }
+    if(args.view==='inspection'){
+     if(args.collection!=='runs')throw new DomainError('inspection_arguments','Inspection requires a run ID.',400);
+     // Captured prompts/tool results may contain the subject's wider private context.
+     // Project access to a run summary is not access to that employee's full context.
+     const current=this.context(actor),local=state.models.some(m=>(m.id===current.run.modelId||m.name===current.run.modelId)&&m.local);
+     if(actor.kind!=='employee'||!local||record.employeeId!==actor.employeeId&&!this.store.canManage(actor,record.employeeId)||state.decisions.some(d=>d.status==='awaiting_your_independent_vote'))throw new DomainError('inspection_forbidden','Full capture requires local inference and own or home-managed work, after independent initial governance judgment. Use scoped run records otherwise.',403);
+     const capture=readInspection(this.dataRoot,record.id),{records,...metadata}=capture;
+     if(args.eventIndex!==undefined&&(!Number.isInteger(args.eventIndex)||args.eventIndex<0||args.eventIndex>=records.length))throw new DomainError('inspection_event','Select an eventIndex from the inspection index.',400);
+     const content=args.eventIndex===undefined?records.map((event,index)=>({eventIndex:index,at:event.at,type:event.type,...(event.payload?.tool?{tool:event.payload.tool,status:event.payload.state?.status}:{})})).reverse():records[args.eventIndex];
+     result={record:{id:record.id},...metadata,eventCount:records.length,...(args.eventIndex===undefined?{guidance:'Newest events first. Select eventIndex for captured content; offset pages that event. Read relevant events, not every repeated prompt.'}:{eventIndex:args.eventIndex}),...excerpt(JSON.stringify(content,null,2),Math.max(0,Number(args.offset)||0))};break;
     }
     if(args.view==='verification'){
      if(args.collection==='runs')throw new DomainError('verification_arguments',`For this run's retained failure summary use company_detail ${JSON.stringify({collection:'runs',id:record.id,view:'record',offset:0})}. The verification view is only for artifact verifier receipts; runtime diagnostic paths are protected provenance, not native-readable files.`);
