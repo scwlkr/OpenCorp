@@ -66,3 +66,19 @@ it('preserves a completed but not yet dispatched reply through restore',async()=
  store.update('company',store.company.id,{state:'paused'});store.restore(backup.path);store.update('company',store.company.id,{state:'running'});
  await transport.tick();expect(store.get('messages',message.id)?.content).toBe('Actual result ready.');expect(store.list('actions')[0]?.status).toBe('succeeded');
 });
+
+it('binds an explicit Owner approval to the delivered proposal and never replays its disposition',async()=>{
+ const api=vi.fn<TelegramApi>().mockImplementation(async method=>({ok:true,result:method==='getUpdates'?[]:{message_id:42}}));
+ const transport=new TelegramTransport(store,config,api),message=outgoing();store.update('messages',message.id,{recipientId:message.senderId});
+ store.update('runs',message.runId!,{status:'running',tokenRevoked:false});
+ const actor={kind:'employee' as const,employeeId:message.senderId,runId:message.runId!,policyRevision:store.policy.revision};
+ const proposal=store.command(actor,{type:'owner.propose',title:'Local validation only',content:'Record a non-executing approval.',proposalScope:'No spending, access changes or external actions.',expiresAt:new Date(Date.now()+3600000).toISOString(),channel:'telegram'});
+ store.update('runs',message.runId!,{status:'succeeded'});await transport.tick();await transport.tick();
+ const reply=(id:number,text:string,user=123)=>({update_id:id,message:{message_id:id,from:{id:user},chat:{id:123,type:'private'},text,reply_to_message:{message_id:42}}});
+ api.mockResolvedValue({ok:true,result:[reply(1,`APPROVE ${proposal.id}`,999),reply(2,'yes'),reply(3,`APPROVE ${proposal.id}`)]});await transport.tick();
+ expect(store.need('attention',proposal.id).disposition).toMatchObject({decision:'approved',channel:'telegram'});
+ const disposition=store.need('attention',proposal.id).disposition;
+ store.close();store=new CompanyStore(root);
+ api.mockResolvedValue({ok:true,result:[reply(3,`APPROVE ${proposal.id}`),reply(4,`DENY ${proposal.id}`)]});await new TelegramTransport(store,config,api).tick();
+ expect(store.need('attention',proposal.id).disposition).toEqual(disposition);expect(store.policy.spendingLimit).toBe(0);
+});
