@@ -1,3 +1,4 @@
+import { RunInspection } from '../src/runtime/inspection.js';
 import { fromJSONSchema } from 'zod';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -1512,4 +1513,25 @@ it('withholds Owner proposal decisions and unassigned email replies from hosted 
  const actor=actorFor(ceo);store.update('runs',actor.runId,{modelId:'synthetic-hosted-route'});
  for(const [collection,id] of [['attention',proposal.id],['messages',proposal.messageId],['messages',incoming.id]])await expect(broker.call(actor,'company_detail',{collection,id})).rejects.toThrow();
  store.update('runs',actor.runId,{modelId:model});expect(JSON.stringify(await broker.call(actor,'company_detail',{collection:'attention',id:proposal.id}))).toContain('SYNTHETIC_PRIVATE_PROPOSAL');
+});
+
+it('serves bounded shared inspection to local home management without exposing it through project or hosted access',async()=>{
+ const manager=hire('Diagnostic manager'),worker=hire('Diagnostic worker',manager.id,'worker'),peer=hire('Project peer',ceo.id,'worker');
+ const project=store.command(owner,{type:'project.create',name:'Shared diagnostic project',outcome:'Recover useful work',acceptance:['Useful result'],supervisorId:manager.id,rationale:'Concrete recovery'});
+ const subject=actorFor(worker,project),managing=actorFor(manager),projectPeer=actorFor(peer,project);
+ const capture=new RunInspection(root,subject.runId,['synthetic-inspection-secret']);
+ capture.record('tool.started',{name:'repo_read',input:'synthetic-inspection-secret',context:'x'.repeat(10000)});
+ capture.record('tool.finished',{result:'retained useful result'});
+ const args={collection:'runs',id:subject.runId,view:'inspection',offset:0};
+ const first=await broker.call(managing,'company_detail',args);
+ expect(first.available).toBe(true);expect(first.content.length).toBeLessThanOrEqual(8000);expect(first.content).not.toContain('synthetic-inspection-secret');
+ const next=await broker.call(managing,'company_detail',{...args,offset:first.nextOffset});
+ expect(next.content).toContain('retained useful result');
+ expect((await broker.call(subject,'company_detail',args)).available).toBe(true);
+ expect((await broker.call(projectPeer,'company_detail',{...args,view:'record'})).record.id).toBe(subject.runId);
+ await expect(broker.call(projectPeer,'company_detail',args)).rejects.toMatchObject({code:'inspection_forbidden'});
+ store.update('runs',managing.runId,{modelId:'hosted-fixture'});
+ await expect(broker.call(managing,'company_detail',args)).rejects.toMatchObject({code:'inspection_forbidden'});
+ const outsider=actorFor(hire('Unrelated worker',ceo.id,'worker'));
+ await expect(broker.call(outsider,'company_detail',args)).rejects.toMatchObject({code:'evidence_forbidden'});
 });

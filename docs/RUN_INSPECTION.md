@@ -27,3 +27,9 @@ The persisted assignment hold survives restart and sleep. It does not dismiss th
 Recovery retains the assignment, identity, workspace, previous run link and corporate/effect records. The next attempt reads current guidance and preserved progress through existing scoped tools. It is a new runtime attempt, not a guarantee of preserving unrecorded model thoughts. A provider action already sent cannot be undone. Existing provider reconciliation must establish presence or proven absence before a possible retry; unknown outcomes stay held. Never change a deduplication key to evade an uncertain receipt.
 
 Supervising management can use the same `assignment.update` fields through `company_command`, subject to existing assignment authority; `employee.model` still requires its existing employee-management authority. Individual controls grant no additional access or spending.
+
+## Employee inspection and learning
+
+Employees use `company_detail {collection:"runs",id:"RUN_ID",view:"inspection",offset:0}` to read paged events from the same bounded capture. Follow `nextOffset`; capture availability and omissions remain explicit. Existing scoped run access is required, plus own/home-managed work and a local inference route because full captured context may contain private material. Project membership alone does not expose another employee's private context. Pending independent initial governance judgment also blocks full capture. Hosted employees retain scoped record summaries and may ask responsible local management for permitted findings. No worker gains the Owner HTTP endpoint.
+
+Management guidance in `skills/management.md` covers wait diagnosis, permitted alternatives, retained ownership, intervention and concise lesson adoption/reversal through existing `update_role` and `roleVersions`. Two comparable failures prompt reconsideration, not a mechanical cutoff. Observe the subsequent employee turn and useful result before calling the lesson effective.
