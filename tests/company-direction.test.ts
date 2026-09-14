@@ -56,3 +56,16 @@ it('new companies do not generate legacy required staffing even with a retained 
  reconcileFormation(store);
  expect(store.list('assignments')).toEqual([]);
 });
+
+it('only explicit Owner registration expands repository access and failed commands leave policy intact',()=>{
+ const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!,policy=store.policy;
+ store.update('company',store.company.id,{state:'running'});
+ const run=store.put('runs',{employeeId:ceo.id,status:'running',tokenRevoked:false,policyRevision:policy.revision});
+ const employee={kind:'employee' as const,employeeId:ceo.id,runId:run.id,policyRevision:policy.revision};
+ const command={type:'product.register',name:'Additional product',repository:'/synthetic/additional',managerId:ceo.id,rationale:'Explicit new repository authorization'};
+ expect(()=>store.command(employee,command)).toThrow(/Owner access envelope/);expect(store.policy).toEqual(policy);
+ expect(()=>store.command(owner,{...command,managerId:'missing'})).toThrow();expect(store.policy).toEqual(policy);
+ const result=store.command(owner,command);expect(result.repository).toBe(command.repository);
+ expect(store.policy).toEqual({...policy,revision:policy.revision+1,allowedRepositories:[...policy.allowedRepositories,command.repository],updatedAt:expect.any(String)});
+ const after=store.policy;expect(store.command(owner,command).id).toBe(result.id);expect(store.policy).toEqual(after);
+});

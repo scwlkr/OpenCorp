@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, realpathSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -15,10 +15,12 @@ const hash = (bytes: Buffer | string) => createHash('sha256').update(bytes).dige
 const workflow = 'name: CI\non: [push, release]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: make test\n';
 let root: string, store: CompanyStore, project: Project, artifact: Artifact, actor: Actor, adapter: ProductReleases;
 let writes: string[], tag: any, remote: any, assets: any[], privacy: boolean, changedTree: boolean, failBeforeTag: boolean, loseAssetResponse: boolean, pauseAfterTag: boolean;
+let releaseConfiguration:unknown;
 let sandbox: ReturnType<typeof vi.fn<typeof executeSandboxed>>;
 let run: typeof checked;
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'opencorp-release-')); store = new CompanyStore(root); store.bootstrap();
+  releaseConfiguration=undefined;
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'opencorp-release-'))); store = new CompanyStore(root); store.bootstrap();
   store.put('models', { name: model, artifactIdentity: 'local-only', local: true, available: true, capabilities: ['tools'] }); store.command(owner, { type: 'control', action: 'start' });
   const ceo = store.list('employees').find((employee) => store.level(employee.id) === 'ceo')!, product = store.list('products').find((product) => product.name === 'WalkLang')!;
   const mirror = join(root, 'repositories', 'product.git'); mkdirSync(mirror, { recursive: true });
@@ -48,7 +50,7 @@ beforeEach(() => {
       if (args.includes('fetch')) return '';
       if (args.includes('ls-tree')) return '.github/workflows/ci.yml';
       if (args.includes('show')) return workflow;
-      if (args.includes('worktree')) { mkdirSync(args[args.indexOf('--detach') + 1], { recursive: true }); return ''; }
+      if (args.includes('worktree')) { const workspace=args[args.indexOf('--detach') + 1];mkdirSync(workspace, { recursive: true });if(releaseConfiguration){mkdirSync(join(workspace,'.opencorp'));writeFileSync(join(workspace,'.opencorp/product.json'),JSON.stringify(releaseConfiguration));} return ''; }
       if (args.includes('--absolute-git-dir')) return mirror;
       if (args.includes('rev-parse')) return changedTree && args.at(-1)?.startsWith(reviewed) ? 'd'.repeat(40) : tree;
     }
@@ -138,4 +140,18 @@ describe('controlled product release pipeline', () => {
     await expect(locked.prepare(actor, { artifactId: artifact.id, version: 'v6.3.4', notes: 'Correction' })).rejects.toThrow(/native build/);
     const release: ReleasePackage = await prepare(); store.command(owner, { type: 'policy.update', reassessMinutes: 45 }); await expect(adapter.publish(actor, { releaseId: release.id })).rejects.toThrow(); expect(writes).toEqual([]);
   });
+});
+
+it.each(['Useful helper','WalkLang'])('packages configured %s at reviewed source and rejects asset paths before executing', async (name) => {
+  store.update('products',project.productId!,{name});
+  const config={release:{target:'github-release',command:'node package.mjs',assets:['helper.zip']}};
+  releaseConfiguration=config;
+  adapter.workspaces.readBlob=vi.fn(async()=>JSON.stringify(config));
+  sandbox.mockImplementation(async(options)=>{const out=join(options.workspace,'.opencorp-release-output');mkdirSync(out);writeFileSync(join(out,'helper.zip'),'configured product');writeFileSync(join(out,'SHA256SUMS'),`${hash('configured product')}  helper.zip\n`);return {code:0,stdout:'',stderr:''};});
+  const release=await prepare();expect(release.assets.map(a=>a.name)).toEqual(['SHA256SUMS','helper.zip']);
+  expect(adapter.workspaces.readBlob).toHaveBeenCalledWith(expect.any(String),merged,'.opencorp/product.json');
+  expect(sandbox.mock.calls[0][0]).toMatchObject({command:"export OPENCORP_RELEASE_VERSION='v6.3.4'; node package.mjs"});
+  config.release.assets=['../escape'];sandbox.mockClear();
+  await expect(adapter.prepare(actor,{artifactId:artifact.id,version:'v6.3.5',notes:'Next release'})).rejects.toThrow(/flat asset names/);
+  expect(sandbox).not.toHaveBeenCalled();expect(writes).toEqual([]);
 });

@@ -36,7 +36,7 @@ describe('public dependency boundary', () => {
     expect(validateBrowserArtifactUrl('https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.55/mac-arm64/chrome-mac-arm64.zip').hostname).toBe('storage.googleapis.com');
     for (const url of ['https://127.0.0.1/browser.zip', 'https://storage.googleapis.com/private-bucket/secret', 'https://cdn.playwright.dev/builds/cft/unexpected/149.0.7827.55/mac-arm64/chrome-mac-arm64.zip']) expect(() => validateBrowserArtifactUrl(url)).toThrow();
   });
-  it.skipIf(process.platform !== 'darwin')('installs from integrity cache offline and confines actual package install scripts', async () => {
+  it.skipIf(process.platform !== 'darwin').each(['OpenJob','Additional product'])('installs %s from integrity cache offline and confines actual package install scripts', async (productName) => {
     const root = await mkdtemp(join(homedir(), '.local/share/opencorp-dependency-test-'));
     const workspace = join(root, 'workspaces/openjob'); await mkdir(join(workspace, 'native'), { recursive: true });
     const protectedFile = join(root, 'owner-sentinel'); await writeFile(protectedFile, 'preserved');
@@ -51,7 +51,7 @@ describe('public dependency boundary', () => {
     await writeFile(join(workspace, 'native/package.json'), '{"name":"fixture-native","version":"1.0.0"}');
     await writeFile(join(workspace, 'native/package-lock.json'), '{"name":"fixture-native","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"fixture-native","version":"1.0.0"}}}');
     try {
-      const result = await prepareProductDependencies({ productName: 'OpenJob', workspace, dataRoot: root });
+      const result = await prepareProductDependencies({ productName, workspace, dataRoot: root });
       expect(result.installed, JSON.stringify(result.checks)).toBe(true);
       expect(result.incrementalCost).toBe(0);
       expect(await readFile(protectedFile, 'utf8')).toBe('preserved');

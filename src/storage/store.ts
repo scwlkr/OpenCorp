@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { DomainError, POSITION_LEVEL_RANK as LEVEL, type Actor, type Artifact, type Project, type Assignment, type AssignmentRequirement, type CorporateCommand, type TableName, type Tables, type CompanySnapshot, type CompanyEvent, type Employee, type PositionLevel, type EmployeeRun, type ExternalAction } from '../core/types.js';
 import { permittedPooledModel, permittedDirectFreeModel, directFreeProvider, productiveSharingAllowed, validProductiveRemoteCapacity, productiveCapacity, permittedOpenRouterFreeModel, validOpenRouterFreeId } from '../core/inference-policy.js';
 import { deliveryFor, projectDispatchAllowed } from '../core/delivery.js';
@@ -312,12 +312,22 @@ export class CompanyStore {
         this.update('experiences',req!.id,{status:'filled',employeeId:employee.id});
         return this.update('employees',employee.id,{requisitionId:req!.id,candidateId:candidate!.id,competencies:candidate!.competencies,sourceIds:candidate!.sourceIds,roleAuthorship:candidate!.authorship,onboarding:{status:'pending',instructions:candidate!.onboarding,firstWork:req!.firstWork}});
       }
+      case 'product.register': {
+        this.requireLevel(actor,['ceo','executive','lead','manager']);
+        const selected=required(c.repository,'Repository');if(!isAbsolute(selected))throw new DomainError('repository_path','Select an absolute repository path');
+        const repository=resolve(selected);
+        if(actor.kind!=='owner'&&!this.policy.allowedRepositories.includes(repository))throw new DomainError('repository_denied','Repository must already be in the Owner access envelope.',403);
+        const prior=this.list('products').find(p=>p.repository===repository);if(prior&&this.policy.allowedRepositories.includes(repository))return prior;
+        const name=required(c.name,'Name'),rationale=required(c.rationale,'Rationale'),managerId=actor.kind==='employee'?actor.employeeId:required(c.managerId,'Manager');this.need('employees',managerId);
+        if(actor.kind==='owner'&&!this.policy.allowedRepositories.includes(repository))this.update('policy',this.policy.id,{revision:this.policy.revision+1,allowedRepositories:[...this.policy.allowedRepositories,repository]});
+        return prior??this.put('products',{name,repository,managerId,assessment:rationale,goals:[],roadmap:[],status:'active',priority:0,rationale});
+      }
       case 'product.register_internal': {
         this.requireLevel(actor,['ceo','executive','lead','manager']);
         const name=required(c.name,'Name'),managerId=actor.kind==='employee'?actor.employeeId:required(c.managerId,'Manager');
         const prior=this.list('products').find(p=>p.kind==='internal-tool'&&p.name===name);if(prior)return prior;
         const verificationCommand=required(c.verificationCommand,'Verification command');
-        if(!/^node (?:--test(?: [A-Za-z0-9_./*-]+)?|[A-Za-z0-9_./-]+\.(?:mjs|cjs|js))$/.test(verificationCommand))throw new DomainError('invalid_verifier','Internal tools use a dependency-free Node test command');
+        if(verificationCommand.length>4000||verificationCommand.includes('\0'))throw new DomainError('invalid_verifier','Use a bounded sandboxed verification command');
         const id=randomUUID();return this.put('products',{id,name,kind:'internal-tool',managerId,repository:resolve(this.dataRoot,'repositories',`${id}.git`),verificationCommand,assessment:required(c.rationale,'Rationale'),goals:[],roadmap:[],status:'active',priority:0,rationale:c.rationale});
       }
       case 'control': {

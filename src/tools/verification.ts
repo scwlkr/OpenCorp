@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { DomainError } from '../core/types.js';
@@ -6,6 +6,8 @@ import { safeChild } from './workspaces.js';
 
 /** Use each repository's actual canonical check sequence at the artifact being checked. */
 export function canonicalVerification(productName: string, workspace: string, baseCommit?: string, registeredCommand?: string): string {
+  const configPath = join(workspace, '.opencorp', 'product.json');
+  if (existsSync(configPath)) registeredCommand = JSON.parse(readFileSync(safeChild(workspace, configPath), 'utf8')).verificationCommand ?? registeredCommand;
   if (registeredCommand !== undefined) {
     if (typeof registeredCommand !== 'string' || !registeredCommand.trim() || registeredCommand.length > 4000 || registeredCommand.includes('\0')) throw new DomainError('invalid_verifier', 'Registered verification command must be bounded nonempty text.');
     return registeredCommand;

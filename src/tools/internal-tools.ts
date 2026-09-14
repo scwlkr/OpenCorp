@@ -6,6 +6,7 @@ import { DomainError } from '../core/types.js';
 import { CompanyStore } from '../storage/store.js';
 import { executeSandboxed } from '../runtime/index.js';
 import { brokerEnvironment, checked } from './process.js';
+import { prepareProductDependencies } from './dependencies.js';
 import { safeChild, WorkspaceManager } from './workspaces.js';
 
 interface Adoption { identity:string; artifactId:string; entrypoint:string; employeeIds:string[]; reviewId:string; adoptedBy:string; adoptedAt:string; runId:string|null }
@@ -29,7 +30,7 @@ export class InternalToolManager {
  async adopt(actor:Actor,input:{artifactId:string;entrypoint:string;employeeIds:string[]}){
   const artifact=this.store.need('artifacts',input.artifactId),project=this.store.need('projects',artifact.projectId!),product=this.product(project.productId!);this.authority(actor,product);
   const review=this.approved(artifact);
-  if(!/^[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:js|mjs|cjs)$/.test(input.entrypoint)||input.entrypoint.split('/').some(p=>p==='..'||p==='.'||!p))throw new DomainError('tool_entrypoint','Use a repository-relative JavaScript executable entrypoint.');
+  if(!/^[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:js|mjs|cjs|sh|py)$/.test(input.entrypoint)||input.entrypoint.split('/').some(p=>p==='..'||p==='.'||!p))throw new DomainError('tool_entrypoint','Use a repository-relative JavaScript, shell or Python entrypoint.');
   if(!Array.isArray(input.employeeIds)||!input.employeeIds.length||input.employeeIds.length>200||input.employeeIds.some(id=>typeof id!=='string'||this.store.need('employees',id).status!=='active'))throw new DomainError('tool_scope','Select active intended employees.');
   if(await this.workspaces.head(project)!==artifact.identity||!await this.workspaces.clean(project))throw new DomainError('artifact_changed','Tool workspace must retain its exact clean reviewed source.',409);
   const path=safeChild(project.workspace!,join(project.workspace!,input.entrypoint));if(!lstatSync(path).isFile()||lstatSync(join(project.workspace!,input.entrypoint)).isSymbolicLink())throw new DomainError('tool_entrypoint','Entrypoint must be a regular source file.');
@@ -60,7 +61,10 @@ export class InternalToolManager {
   const receipt=this.store.put('experiences',{kind:'internal-tool-use',productId:product.id,artifactId:adoption.artifactId,identity:adoption.identity,employeeId:actor.employeeId,runId:actor.runId,workspace,status:'prepared'});
   this.store.update('experiences',receipt.id,{status:'dispatched'});
   try{
-   const result=await executeSandboxed({workspace,command:[process.execPath,adoption.entrypoint,...args],dataRoot:this.dataRoot,runId:`tool-${id}`,signal:options.signal,timeoutMs:60000});
+   const prepared=await prepareProductDependencies({productName:product.name,workspace,dataRoot:this.dataRoot,signal:options.signal});
+   if(!prepared.installed)throw new DomainError('tool_dependencies','Reviewed dependencies could not be prepared.',409);
+   this.store.validateActor(actor,true);this.approved(this.store.need('artifacts',adoption.artifactId));if(JSON.stringify(this.product(product.id).adoption)!==JSON.stringify(adoption))throw new DomainError('tool_version','Adopted version changed during dependency preparation.',409);
+   const result=await executeSandboxed({workspace,toolEnvironment:prepared.environment,command:[adoption.entrypoint.endsWith('.sh')?'/bin/sh':adoption.entrypoint.endsWith('.py')?'python3':prepared.environment.binPaths.length?'node':process.execPath,adoption.entrypoint,...args],dataRoot:this.dataRoot,runId:`tool-${id}`,signal:options.signal,timeoutMs:60000});
    const final=this.store.update('experiences',receipt.id,{status:result.code===0?'succeeded':'failed',exitCode:result.code,stdout:result.stdout.slice(-16000),stderr:result.stderr.slice(-8000),completedAt:new Date().toISOString()});this.store.emit('internal-tool.used',{receiptId:receipt.id,productId:product.id,identity:adoption.identity,employeeId:actor.employeeId,status:final.status});return final;
   }catch(error){this.store.update('experiences',receipt.id,{status:'uncertain',detail:String(error)});throw error;}
  }
