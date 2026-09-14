@@ -4,7 +4,7 @@ Management chooses the audience and useful core, delegates implementation and sp
 
 ## Repositories and checks
 
-`product.register {name, repository, rationale}` registers a local checkout already present in the Owner repository access envelope. The connected GitHub identity and original checkout remain unchanged. It grants no new repository access. The Owner command additionally supplies `managerId`; employees register under their own management authority. `repo_inspect` discovers the actual repository/default branch and creates the existing isolated workspace foundation.
+`product.register {name, repository, rationale}` registers a local checkout already present in the Owner repository access envelope. The connected GitHub identity and original checkout remain unchanged. Employees cannot grant new repository access. The authenticated Owner command additionally supplies `managerId` and may explicitly authorize a new absolute repository path; this adds only that path to policy and advances its revision. Failed registration leaves policy intact. Merely installing this capability changes no running permissions. `repo_inspect` discovers the actual repository/default branch and creates the existing isolated workspace foundation.
 
 `product.register_internal {name, verificationCommand, rationale}` creates company-owned local software without a public repository prerequisite. Existing internal products and adoption history remain usable. Both paths use ordinary project/assignment, commit, verification and independent review tools.
 

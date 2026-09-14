@@ -57,13 +57,15 @@ it('new companies do not generate legacy required staffing even with a retained 
  expect(store.list('assignments')).toEqual([]);
 });
 
-it('registers additional products only inside existing Owner repository authority',()=>{
- const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!;
- const policy=store.policy;
- expect(()=>store.command(owner,{type:'product.register',name:'Outside',repository:'/synthetic/unapproved',managerId:ceo.id,rationale:'New need'})).toThrow(/Owner access envelope/);
- const repository=policy.allowedRepositories[0];const previous=store.list('products').find(p=>p.repository===repository)!;store.update('products',previous.id,{repository:'/synthetic/retained-other'});
- const result=store.command(owner,{type:'product.register',name:'Configured product',repository,managerId:ceo.id,rationale:'Existing permitted need'});
- expect(result.repository).toBe(repository);expect(store.policy).toEqual(policy);
- const worker=store.list('employees').find(e=>store.level(e.id)==='worker');
- if(worker){const run=store.put('runs',{employeeId:worker.id,status:'running',tokenRevoked:false,policyRevision:policy.revision});expect(()=>store.command({kind:'employee',employeeId:worker.id,runId:run.id,policyRevision:policy.revision},{type:'product.register',name:'Unauthorized',repository,rationale:'No authority'})).toThrow();}
+it('only explicit Owner registration expands repository access and failed commands leave policy intact',()=>{
+ const ceo=store.list('employees').find(e=>store.level(e.id)==='ceo')!,policy=store.policy;
+ store.update('company',store.company.id,{state:'running'});
+ const run=store.put('runs',{employeeId:ceo.id,status:'running',tokenRevoked:false,policyRevision:policy.revision});
+ const employee={kind:'employee' as const,employeeId:ceo.id,runId:run.id,policyRevision:policy.revision};
+ const command={type:'product.register',name:'Additional product',repository:'/synthetic/additional',managerId:ceo.id,rationale:'Explicit new repository authorization'};
+ expect(()=>store.command(employee,command)).toThrow(/Owner access envelope/);expect(store.policy).toEqual(policy);
+ expect(()=>store.command(owner,{...command,managerId:'missing'})).toThrow();expect(store.policy).toEqual(policy);
+ const result=store.command(owner,command);expect(result.repository).toBe(command.repository);
+ expect(store.policy).toEqual({...policy,revision:policy.revision+1,allowedRepositories:[...policy.allowedRepositories,command.repository],updatedAt:expect.any(String)});
+ const after=store.policy;expect(store.command(owner,command).id).toBe(result.id);expect(store.policy).toEqual(after);
 });
