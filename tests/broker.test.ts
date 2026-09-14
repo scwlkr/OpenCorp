@@ -65,6 +65,13 @@ describe('typed management tools',()=>{
   const outcome=()=>managementOutcome(store,store.need('assignments',task.id),store.need('runs',actor.runId));
   return {manager,worker,project,original,failed,actor,task,outcome};
  }
+ it('lets responsible fault management adopt a skill lesson while preserving role authority',async()=>{
+  const {actor,original}=diagnosis(),employee=store.need('employees',original.employeeId);
+  expect(broker.toolsFor(actor).map(t=>t.name)).toContain('update_role');
+  await broker.call(actor,'update_role',{employeeId:employee.id,content:employee.role+'\nUse retained results before retrying.',source:actor.runId,rationale:'Observed repeated recovery failure'});
+  expect(store.need('employees',employee.id).roleVersion).toBe(employee.roleVersion+1);
+  await expect(broker.call(actor,'update_role',{employeeId:ceo.id,content:'Unauthorized revision',source:actor.runId,rationale:'Not a managed employee'})).rejects.toMatchObject({code:'forbidden'});
+ });
  it('keeps inline diagnosis knowledge linked and authorized without changing normal or explicit reads',async()=>{
   const {actor,original,failed}=diagnosis();
   const linked=store.command(owner,{type:'knowledge.write',scope:'company',content:'LINKED_FAILURE_FINDING',source:`Observed failed run ${failed.id}`});
@@ -110,7 +117,7 @@ describe('typed management tools',()=>{
  it('scopes trusted fault recovery and initial evidence without removing full authorized reads',async()=>{
   const {actor,original,failed,worker,project}=diagnosis();
   const names=(await disclosedTools(actor)).map(tool=>tool.name),schema=(await disclosedTools(actor)).find(t=>t.name==='company_command')!.inputSchema.properties.command;
-  expect(schema.anyOf.map((b:any)=>b.properties.type.enum[0]).sort()).toEqual(['employee.model','assignment.update','assignment.create','decision.create','responsibility.update','owner.request','message.send'].sort());
+  expect(schema.anyOf.map((b:any)=>b.properties.type.enum[0]).sort()).toEqual(['role.update','employee.model','assignment.update','assignment.create','decision.create','responsibility.update','owner.request','message.send'].sort());
   for(const name of ['record_blocked_diagnosis','create_assignment','company_read','company_detail','knowledge_search','repo_read','repo_pr','repo_issue','inspect_artifact','fetch_public','browser','skill_discover','skill_import','skill_read'])expect(names).toContain(name);
   for(const name of ['communicate','propose_executive','vote_decision','commit_work','deliver_product','publish_release'])expect(names).not.toContain(name);
   const help=await broker.call(actor,'company_help',{});expect(help).toContain(original.id);expect(help).toContain(failed.id);expect(help).toContain('actual current-run model or instruction change');expect(help.length).toBeLessThan(3000);

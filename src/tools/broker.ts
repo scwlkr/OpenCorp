@@ -78,7 +78,7 @@ Direct tools take direct arguments. Generic corporate commands put fields inside
 export const initialVoteGuide=`Read the assigned decision with company_detail, including its payload and derived appointmentEffect when present. Inspect relevant retained company, role, source, product, and outcome evidence needed for your judgment. Source depth remains your responsibility; use detail pages and repository reads as needed.
 Record your own independent initial judgment with vote_decision {decisionId:ASSIGNED_DECISION_ID,approve:YOUR_BOOLEAN,rationale:YOUR_EVIDENCE_BASED_REASON}. Supply direct fields, no command or payload wrapper. Choose the actual boolean yourself; no default vote or invented acceptance criteria. Peer initial judgments remain hidden until your own vote is recorded. Your initial vote is immutable.
 After the vote receipt, briefly summarize your independent rationale and end this assignment. This task does not authorize appointment, hiring, product publication, or speaking for another Elder.`;
-const recoveryCommands=new Set(['employee.model','assignment.update','assignment.create','decision.create','responsibility.update','owner.request','message.send']);
+const recoveryCommands=new Set(['role.update','employee.model','assignment.update','assignment.create','decision.create','responsibility.update','owner.request','message.send']);
 const departmentFormationCommands=new Set(['department.create','department.update','position.create','position.update','responsibility.update','owner.request']);
 const executiveProposalCommands=new Set(['position.create','decision.create','responsibility.update','owner.request']);
 
@@ -373,7 +373,7 @@ Record the next accountable action with company_command {command:{type:"responsi
   const acceptance=assignment.kind==='management'&&assignment.projectId===null&&original&&assignment.payload.sourceProjectId===original.projectId&&assignment.schedulerKey?.startsWith(`acceptance:${original.id}:`);
   if(fault||acceptance||this.responsibilityContext(actor)){
    const names=new Set(['company_help','company_read','company_detail','company_command','create_assignment','knowledge_search','repo_inspect','repo_read','repo_pr','repo_issue','fetch_public','browser','inspect_artifact','skill_read','skill_discover','skill_import']);
-   if(fault){names.add('record_blocked_diagnosis');names.add('revise_and_retry_assignment');}
+   if(fault){names.add('record_blocked_diagnosis');names.add('revise_and_retry_assignment');names.add('update_role');}
    if(acceptance)names.add('finish_assignment');
    return brokerTools.filter(tool=>names.has(tool.name)).map(tool=>tool.name==='company_command'?{...tool,description:'Retain recovery, responsibility or acceptance decisions; preserve original acceptance and authority.',inputSchema:objectSchema({command:{...commandSchema,anyOf:commandSchema.anyOf.filter(branch=>recoveryCommands.has(branch.properties.type.enum[0]!))}},['command'])}:tool);
   }
