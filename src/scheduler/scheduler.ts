@@ -284,6 +284,9 @@ export class Scheduler {
   const ready=this.store.list('assignments').filter(a=>a.status==='queued'&&!a.paused&&a.accepted!==false&&a.availableAt<=new Date().toISOString()&&formationDispatchAllowed(this.store,a)&&!this.store.reviewScopeIssue(a)&&this.store.reviewScopeCorrectionAllowed(a)&&governanceDispatchAllowed(this.store,a)&&(!a.projectId||projectDispatchAllowed(this.store.need('projects',a.projectId),a))&&(!a.projectId||this.store.need('projects',a.projectId).status==='active')&&a.dependencies.every(id=>this.store.get('assignments',id)?.status==='completed')&&this.store.need('employees',a.employeeId).status==='active').sort((a,b)=>(b.priority+Math.floor((Date.now()-Date.parse(b.createdAt))/3_600_000))-(a.priority+Math.floor((Date.now()-Date.parse(a.createdAt))/3_600_000)));
   const configured=this.runtime.status?.(),slots=Math.min(this.store.policy.maxInference,configured?.inferenceSlots??1);
   for(const candidate of ready){
+   // Immediately resolved admission checks must not starve transport or Owner controls.
+   await new Promise<void>(resolve=>setImmediate(resolve));
+   if(lifecycle!==this.lifecycle||this.stopping||this.store.company.state!=='running')return;
    const employeeRevision=JSON.stringify(this.store.need('employees',candidate.employeeId));
    const route=await this.inferenceRoute(candidate),selectedId=route.modelId;
    if(lifecycle!==this.lifecycle||this.stopping||this.store.company.state!=='running')return;
