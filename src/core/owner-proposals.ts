@@ -1,3 +1,4 @@
+import { computeGrant } from './compute-budget.js';
 import type { CompanyStore } from '../storage/store.js';
 import { DomainError, type Actor, type CorporateCommand, type Message, type ExternalAction } from './types.js';
 
@@ -19,13 +20,15 @@ export function createOwnerProposal(store:CompanyStore,actor:Actor,c:CorporateCo
  if(!['telegram','email'].includes(c.channel)||!Number.isFinite(Date.parse(c.expiresAt))||Date.parse(c.expiresAt)<=Date.now())throw new DomainError('invalid_proposal','Choose telegram or email and a future expiresAt.');
  const employee=actor.kind==='employee'?store.need('employees',actor.employeeId):store.list('employees').find(e=>e.status==='active'&&store.level(e.id)==='ceo');
  if(!employee)throw new DomainError('recipient_unavailable','An active employee must own the proposal.',409);
+ const grant=c.computeGrant===undefined?undefined:computeGrant(store,actor,c.computeGrant);
+ if(grant&&(c.actionId||c.channel!=='email'))throw new DomainError('invalid_proposal','Compute grants require email and cannot also reserve a product action.');
  const action=c.actionId?store.need('actions',c.actionId):undefined;
  if(action&&!store.get('products',action.productId))throw new DomainError('invalid_proposal','Reserve a product action; transport and service effects use their existing controls.');
  if(action&&(action.ownerProposalId||!['blocked','prepared'].includes(action.status)||action.policyRevision!==store.policy.revision||action.cost===null||!Number.isFinite(action.cost)||action.cost<0||!action.costEvidence))throw new DomainError('invalid_proposal','Action must have a known cost, current policy and no prior proposal or dispatch.');
  if(action&&actor.kind==='employee'&&action.employeeId!==actor.employeeId&&!store.canManage(actor,action.employeeId))throw new DomainError('forbidden','Cannot reserve another employee action.',403);
- const proposal=store.put('attention',{kind:'owner_proposal',title,detail:content,scope,expiresAt:new Date(c.expiresAt).toISOString(),status:'open',policyRevision:store.policy.revision,employeeId:employee.id,runId:actor.kind==='employee'?actor.runId:null,...(action?{actionId:action.id,actionScope:actionScope(action)}:{})});
+ const proposal=store.put('attention',{kind:'owner_proposal',title,detail:content,scope,expiresAt:new Date(c.expiresAt).toISOString(),status:'open',policyRevision:store.policy.revision,employeeId:employee.id,runId:actor.kind==='employee'?actor.runId:null,...(grant?{computeGrant:grant}:{}),...(action?{actionId:action.id,actionScope:actionScope(action)}:{})});
  if(action)store.update('actions',action.id,{status:'blocked',ownerProposalId:proposal.id});
- const message=store.put('messages',{senderId:employee.id,recipientId:'owner',projectId:null,content:`${title}\n\n${content}\n\nExact scope: ${scope}\nExpires: ${proposal.expiresAt}${action?`\nExact action: ${JSON.stringify(proposal.actionScope)}`:'\nThis records a scope-specific decision only; no executable action or general permission is granted.'}\n\nReply to this message with exactly APPROVE ${proposal.id} or DENY ${proposal.id}. Silence leaves it pending.`,channel:c.channel,proposalId:proposal.id,runId:proposal.runId});
+ const message=store.put('messages',{senderId:employee.id,recipientId:'owner',projectId:null,content:`${title}\n\n${content}\n\nExact scope: ${scope}\nExpires: ${proposal.expiresAt}${grant?`\nCompute allowance (USD): ${grant.ceilingMicrousd/1_000_000} total.\nPermitted routes: ${JSON.stringify(grant.routes)}\nFrozen named work: ${JSON.stringify(grant.work)}\nApproval permits only this supplemental text compute; no general spending, credential or private-data permission.`:action?`\nExact action: ${JSON.stringify(proposal.actionScope)}`:'\nThis records a scope-specific decision only; no executable action or general permission is granted.'}\n\nReply to this message with exactly APPROVE ${proposal.id} or DENY ${proposal.id}. Silence leaves it pending.`,channel:c.channel,proposalId:proposal.id,runId:proposal.runId});
  return store.update('attention',proposal.id,{messageId:message.id});
 }
 
