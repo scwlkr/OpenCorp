@@ -3,6 +3,7 @@ import { DomainError, type CorporateCommand } from '../core/types.js';
 // Required fields come from existing CompanyStore validators. Defaults and
 // conditional requirements (for example retry rationale) remain in the domain.
 export const commandFields:Record<string,{required:string[];optional:string[]}>= {
+ 'owner.propose':{required:['title','content','proposalScope','expiresAt','channel'],optional:['actionId']},
  'owner.request':{required:['title','detail','requiredAction','recommendation'],optional:['assignmentId','nextCheckAt']},
  'responsibility.update':{required:['assignmentId','kind','action'],optional:['ownerId','nextCheckAt','followupAssignmentId','attentionId']},
  'review.respond':{required:['decisionId','rationale','kind'],optional:['followupAssignmentId']},
@@ -62,6 +63,7 @@ export const assignmentPayload={type:'object',description:'Assignment-specific m
 },additionalProperties:true};
 export const commandProperties:Record<string,any>={
  type:{type:'string',enum:employeeCommands},
+ proposalScope:text('Exact reserved scope for this proposal only; never general permission.'),expiresAt:text('Future ISO expiration for this exact proposal and action.'),actionId:text('Optional existing undispatched action to reserve and authorize exactly once.'),
  detail:text('Observed prerequisite or obstacle.'),requiredAction:text('Smallest indispensable Owner input.'),recommendation:text('Management recommendation.'),nextCheckAt:text('Future ISO date within 30 days.'),ownerId:text('Accountable employee ID.'),action:text('Concrete next action retaining responsibility.'),followupAssignmentId:text('Actual next assignment ID.'),attentionId:text('Open Owner request ID.'),
  channelId:text('Persistent workplace channel ID.'),eventId:text('Persistent workplace event ID.'),purpose:text('Internal event purpose; demonstration gatherings must be labeled.'),participantIds:strings,scheduledAt:text('ISO event schedule'),eventType:{type:'string',enum:['welcome','formation_anniversary','fictional_birthday','office_party','gathering']},subjectEmployeeId:text('Employee celebrated; persona birthdays are fictional.'),recurrence:{type:'string',enum:['none','annual','weekly']},durationMinutes:{type:'integer',minimum:1,maximum:60},maxTurnsPerParticipant:{type:'integer',minimum:1,maximum:2},
  charter:text('Department purpose and scope.'),helpPolicy:text('When and where to seek help.'),
@@ -93,7 +95,7 @@ export const commandProperties:Record<string,any>={
  availableAt:text('Assignment eligibility time as an ISO timestamp.'),blockedReason:text('Precise observed impediment; does not replace acceptance.'),
  subject:text('Decision subject.'),decisionId:text('Exact decision for the independent vote.'),approve:{type:'boolean',description:'Explicit independent vote; false is dissent.'},
  wake:{type:'boolean',description:'Wake recipient for action by default; false records an informational message only.'},
- channel:{type:'string',enum:['email'],description:'Send an Owner report or proposal through configured email; omit for ordinary conversation.'},
+ channel:{type:'string',enum:['email','telegram'],description:'owner.propose requires a channel. message.send accepts email only. Send an Owner report or proposal through configured email; omit for ordinary conversation.'},
  recipientId:text('Message recipient; defaults to active CEO.'),content:text('Actual message, role text, or Markdown knowledge body.'),
  summary:text('Observed experience summary.'),learned:text('Source-linked lesson.'),environment:text('Observed execution environment.'),
  scope:{type:'string',enum:['company','products','departments','projects','employees']},scopeId:text('ID belonging to the selected knowledge scope.'),

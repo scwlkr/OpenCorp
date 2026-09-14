@@ -426,7 +426,7 @@ Record the next accountable action with company_command {command:{type:"responsi
    hiddenChanged=before!==hiddenAssignments.size;
   }
   const hiddenRuns=new Set(state.runs.filter(r=>hiddenAssignments.has(r.assignmentId)).map(r=>r.id));
-  state.attention=state.attention.filter(a=>!hiddenAssignments.has(a.assignmentId)&&!hiddenRuns.has(a.runId));
+  state.attention=state.attention.filter(a=>!(hosted&&a.kind==='owner_proposal')&&!hiddenAssignments.has(a.assignmentId)&&!hiddenRuns.has(a.runId));
   state.votes=state.votes.filter(v=>decisions.has(v.decisionId)&&!hiddenRuns.has(v.runId)); // snapshot(actor) already enforces independent initial judgments.
   const faultOriginal=this.store.faultContext(actor.runId)?.assignment.id;
   state.assignments=state.assignments.filter(a=>!hiddenAssignments.has(a.id)&&(a.id===faultOriginal||canReadEmployee(a.employeeId)||!!a.projectId&&projects.has(a.projectId)));
@@ -439,8 +439,9 @@ Record the next accountable action with company_command {command:{type:"responsi
   state.roleVersions=state.roleVersions.filter(r=>canReadEmployee(r.employeeId)&&!blindPeers.has(r.employeeId));
   state.employees=state.employees.map(e=>blindPeers.has(e.id)?{...e,role:'Role content withheld until your independent initial judgment is recorded.'}:e);
   const channels=new Set(state.experiences.filter(r=>r.kind==='workplace.channel').map(r=>r.id));
-  state.messages=state.messages.filter(m=>!(hosted&&m.telegram?.direction==='incoming')&&!hiddenRuns.has(m.runId??'')&&(broad||m.senderId===employee.id||m.recipientId===employee.id||!!m.projectId&&projects.has(m.projectId)||m.recipientId==null&&m.projectId==null&&channels.has(m.channelId)));
+  state.messages=state.messages.filter(m=>!(hosted&&(m.telegram?.direction==='incoming'||m.email?.direction==='incoming'||m.proposalId))&&!hiddenRuns.has(m.runId??'')&&(broad||m.senderId===employee.id||m.recipientId===employee.id||!!m.projectId&&projects.has(m.projectId)||m.recipientId==null&&m.projectId==null&&channels.has(m.channelId)));
   state.knowledge=state.knowledge.filter(k=>!hiddenRuns.has(k.provenance?.runId)&&!blindPeers.has(k.provenance?.authorId)&&!(k.scope==='employees'&&blindPeers.has(k.scopeId??''))&&(broad||k.scope==='company'||k.scope==='employees'&&!!k.scopeId&&canReadEmployee(k.scopeId)||k.scope==='projects'&&projects.has(k.scopeId??'')||k.scope==='products'&&products.has(k.scopeId)||k.scope==='departments'&&departments.has(k.scopeId??'')));
+  if(hosted)state.actions=state.actions.filter(a=>!a.ownerProposalId&&!this.store.get('messages',a.content?.messageId)?.proposalId);
   if(confidential.size){
    const privateProjects=new Set(this.store.list('assignments').filter(a=>confidential.has(a.id)&&a.projectId).map(a=>a.projectId));
    const privateMessages=new Set(this.store.list('assignments').filter(a=>confidential.has(a.id)).map(a=>a.payload?.messageId));

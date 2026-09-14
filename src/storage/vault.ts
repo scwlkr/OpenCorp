@@ -269,6 +269,7 @@ export class KnowledgeVault {
     const sourceDb=new Database(join(source,'company.sqlite'),{readonly:true});
     const checked=sourceDb.pragma('integrity_check',{simple:true});
     if (checked!=='ok') { sourceDb.close(); throw new DomainError('invalid_backup','Backup database failed integrity check'); }
+    const ownerProposals=this.store.list('attention').filter(a=>a.kind==='owner_proposal');
     const priorActions=this.store.list('actions'), revision=this.store.policy.revision;
     const conversationIntegrations=['owner-telegram','owner-email'].flatMap(id=>{const value=this.store.get('integrations',id);return value?[value]:[];});
     const conversationMessages=this.store.list('messages').filter(m=>m.telegram?.direction==='incoming'||m.email?.direction==='incoming'||conversationIntegrations.length>0&&m.recipientId==='owner');
@@ -331,6 +332,7 @@ export class KnowledgeVault {
           this.store.put('actions',{...action,...(['prepared','dispatched'].includes(action.status)?{status:'uncertain'}:{})});
         }
         // Restoring a backup cannot rewind confirmed Owner intake or lose an accepted message.
+        for(const proposal of ownerProposals)this.store.put('attention',proposal);
         for(const integration of conversationIntegrations)this.store.put('integrations',integration);
         for(const message of conversationMessages)this.store.put('messages',message);
         for(const run of conversationRuns)this.store.put('runs',{...run,tokenRevoked:true,...(['running','queued','cancelling'].includes(run.status)?{status:'interrupted'}:{})});

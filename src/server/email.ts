@@ -1,3 +1,4 @@
+import { resolveOwnerProposal, ownerDirectedProposal } from '../core/owner-proposals.js';
 import { createHash, createHmac } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -73,7 +74,7 @@ export class EmailTransport{
    for(const message of this.store.list('messages').filter(m=>m.email?.direction==='incoming')){
     if(!this.store.list('assignments').some(a=>a.payload?.messageId===message.id)){
      const parent=this.store.get('actions',message.email.parentActionId),original=parent?this.store.get('messages',parent.content.messageId):undefined;
-     try{queueOwnerConversation(this.store,{content:`Owner email reply to shared message ${original?.id??'unavailable'}:\n${message.content}`,employeeId:original?.senderId&&this.store.get('employees',original.senderId)?.status==='active'?original.senderId:undefined},message.id);}catch(error){if(!(error instanceof DomainError&&error.code==='recipient_unavailable'))throw error;}
+     try{const response=resolveOwnerProposal(this.store,message,message.email.parentActionId);queueOwnerConversation(this.store,{content:`Owner email reply to shared message ${original?.id??'unavailable'}:\n${message.content}${response?`\nVerified proposal response: ${JSON.stringify(response)}. Report this recorded outcome; do not reinterpret it or change permissions.`:''}`,employeeId:original?.senderId&&this.store.get('employees',original.senderId)?.status==='active'?original.senderId:undefined},message.id);}catch(error){if(!(error instanceof DomainError&&error.code==='recipient_unavailable'))throw error;}
     }
    }
   }finally{this.active=false;}
@@ -90,10 +91,10 @@ export class EmailTransport{
  private queueOutgoing(){
   for(const message of this.store.list('messages')){
    if(message.createdAt<this.store.need('integrations',integrationId).enabledAt||message.recipientId!=='owner'||message.channel!=='email')continue;
-   const run=this.store.get('runs',message.runId??'');if(!run||run.status!=='succeeded')continue;
+   const run=this.store.get('runs',message.runId??'');if((!run||run.status!=='succeeded')&&!ownerDirectedProposal(this.store,message))continue;
    const dedupeKey=`email:${this.binding}:${message.id}`;if(this.store.list('actions').some(a=>a.dedupeKey===dedupeKey))continue;
-   const assignment=this.store.get('assignments',run.assignmentId),incoming=this.store.get('messages',assignment?.payload?.messageId??'');
-   this.store.put('actions',{employeeId:message.senderId,runId:run.id,productId:'',kind:'email.send',target:this.binding,content:{messageId:message.id,text:`${this.store.get('employees',message.senderId)?.name??message.senderId}:\n\n${message.content}`,parentActionId:incoming?.email?.parentActionId},dedupeKey,status:'prepared',policyRevision:run.policyRevision,cost:0,costEvidence:'Cloudflare verified destination; no paid sending requested.'});
+   const assignment=this.store.get('assignments',run?.assignmentId??''),incoming=this.store.get('messages',assignment?.payload?.messageId??'');
+   this.store.put('actions',{employeeId:message.senderId,runId:run?.id??'',productId:'',kind:'email.send',target:this.binding,content:{messageId:message.id,text:`${this.store.get('employees',message.senderId)?.name??message.senderId}:\n\n${message.content}`,parentActionId:incoming?.email?.parentActionId},dedupeKey,status:'prepared',policyRevision:run?.policyRevision??this.store.policy.revision,cost:0,costEvidence:'Cloudflare verified destination; no paid sending requested.'});
   }
  }
 }

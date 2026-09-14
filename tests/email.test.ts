@@ -47,3 +47,32 @@ it('relay rejects unauthenticated access and forged inbound reply capabilities w
  expect((await worker.fetch(new Request('https://example.com/inbox'),env)).status).toBe(401);
  const reject=vi.fn();await worker.email({from:config.owner,to:'ceo+'+'0'.repeat(56)+'@example.com',rawSize:10,raw:new ReadableStream(),setReject:reject},env);expect(reject).toHaveBeenCalledOnce();expect(env.INBOX.put).not.toHaveBeenCalled();
 });
+it('applies only the exact nonbillable action, rejects a changed scope and preserves decisions through restore',async()=>{
+ let replyTo='';const api=apiWithSend(async body=>{replyTo=body.replyTo;return {id:'proposal-receipt'};});
+ const transport=new EmailTransport(store,config,api),message=outgoing();store.update('messages',message.id,{recipientId:message.senderId});store.update('runs',message.runId!,{status:'running',tokenRevoked:false});
+ const actor={kind:'employee' as const,employeeId:message.senderId,runId:message.runId!,policyRevision:store.policy.revision};
+ const action=store.put('actions',{employeeId:actor.employeeId,runId:actor.runId,productId:store.list('products')[0]!.id,kind:'validation',target:'local-only',content:{operation:'record-only'},dedupeKey:'synthetic-validation',status:'prepared',policyRevision:store.policy.revision,cost:0,costEvidence:'Nonbillable local check'});
+ const backup=store.backup();
+ const proposal=store.command(actor,{type:'owner.propose',title:'Local check',content:'No real effect.',proposalScope:'Record one local validation only.',actionId:action.id,expiresAt:new Date(Date.now()+3600000).toISOString(),channel:'email'});
+ expect(()=>store.dispatchAction(actor,action.id)).toThrow();
+ store.update('runs',actor.runId,{status:'succeeded'});await transport.tick(now);
+ api.mockImplementation(async path=>path==='inbox'?{messages:[{id:'e'.repeat(64),from:config.owner,to:replyTo,text:`APPROVE ${proposal.id}\n\nOn Monday, CEO wrote:\n> Earlier proposal` }]}:{ok:true});
+ await transport.tick(now);expect(store.need('attention',proposal.id).disposition).toMatchObject({decision:'approved',channel:'email'});
+ store.update('runs',actor.runId,{tokenRevoked:true});const successor=store.put('runs',{...store.need('runs',actor.runId),id:undefined,status:'running',tokenRevoked:false});const resumed={...actor,runId:successor.id};
+ store.update('runs',successor.id,{assignmentId:'different-work'});expect(()=>store.dispatchAction(resumed,action.id)).toThrow('assignment');store.update('runs',successor.id,{assignmentId:store.need('runs',actor.runId).assignmentId});store.update('actions',action.id,{target:'changed-target'});expect(()=>store.dispatchAction(resumed,action.id)).toThrow('scope');
+ store.update('actions',action.id,{target:'local-only'});store.update('attention',proposal.id,{expiresAt:new Date(0).toISOString()});expect(()=>store.dispatchAction(resumed,action.id)).toThrow('expiration');store.update('attention',proposal.id,{expiresAt:new Date(Date.now()+3600000).toISOString()});expect(store.dispatchAction(resumed,action.id).status).toBe('dispatched');expect(()=>store.dispatchAction(resumed,action.id)).toThrow();
+ store.update('company',store.company.id,{state:'paused'});store.restore(backup.path);
+ expect(store.need('attention',proposal.id).disposition.decision).toBe('approved');expect(store.need('actions',action.id).status).toBe('uncertain');
+});
+it.each(['denied','expired','wrong-thread','conditional','quoted','condition-after-quote'])('keeps %s replies from granting authority',async mode=>{
+ let replyTo='';const api=apiWithSend(async body=>{replyTo=body.replyTo;return {id:'nonbillable-receipt'};});
+ const transport=new EmailTransport(store,config,api);
+ const proposal=store.command({kind:'owner'},{type:'owner.propose',title:'Harmless scope',content:'No external effect.',proposalScope:'Record only.',expiresAt:new Date(Date.now()+3600000).toISOString(),channel:'email'});
+ await transport.tick(now);
+ if(mode==='expired')store.update('attention',proposal.id,{expiresAt:new Date(0).toISOString()});
+ if(mode==='wrong-thread'){const other=outgoing();await transport.tick(now);expect(other.id).not.toBe(proposal.messageId);}
+ const content=mode==='denied'?`DENY ${proposal.id}`:mode==='condition-after-quote'?`APPROVE ${proposal.id}\n\nOn Monday, CEO wrote:\n> proposal\n\nOnly if price drops.`:mode==='conditional'?`APPROVE ${proposal.id} if the price changes`:mode==='quoted'?`> APPROVE ${proposal.id}`:`APPROVE ${proposal.id}`;
+ api.mockImplementation(async path=>path==='inbox'?{messages:[{id:'f'.repeat(64),from:config.owner,to:replyTo,text:content}]}:{ok:true});
+ await transport.tick(now);
+ expect(store.need('attention',proposal.id).disposition?.decision).toBe(mode==='denied'?'denied':undefined);expect(store.policy.spendingLimit).toBe(0);
+});

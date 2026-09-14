@@ -1506,3 +1506,10 @@ it('starts conversation history with newest scoped records and preserves ordinar
  const recent=await broker.call(actor,'company_read',{collection:'messages',limit:1});expect(recent.items[0].id).toBe(newer.id);
  const next=await broker.call(actor,recent.nextCall.tool,recent.nextCall.arguments);expect(next.items[0].id).toBe(older.id);
 });
+it('withholds Owner proposal decisions and unassigned email replies from hosted employee reads',async()=>{
+ const proposal=store.command(owner,{type:'owner.propose',title:'SYNTHETIC_PRIVATE_PROPOSAL',content:'Private scope',proposalScope:'Record only.',expiresAt:new Date(Date.now()+3600000).toISOString(),channel:'email'});
+ const incoming=store.put('messages',{senderId:'owner',recipientId:ceo.id,content:'SYNTHETIC_PRIVATE_REPLY',email:{direction:'incoming'},projectId:null,runId:null});
+ const actor=actorFor(ceo);store.update('runs',actor.runId,{modelId:'synthetic-hosted-route'});
+ for(const [collection,id] of [['attention',proposal.id],['messages',proposal.messageId],['messages',incoming.id]])await expect(broker.call(actor,'company_detail',{collection,id})).rejects.toThrow();
+ store.update('runs',actor.runId,{modelId:model});expect(JSON.stringify(await broker.call(actor,'company_detail',{collection:'attention',id:proposal.id}))).toContain('SYNTHETIC_PRIVATE_PROPOSAL');
+});

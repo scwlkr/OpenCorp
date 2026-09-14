@@ -52,13 +52,14 @@ export class GitHubDelivery {
   this.store.validateActor(actor,true);
   return {repository:repo,visibility:'public',defaultBranch:live.default_branch,defaultBranchHead:head.sha,artifactId:artifact.id,artifactIdentity:artifact.identity,workflowPaths,workflowQualification,checkedAt:new Date().toISOString()};
  }
- private recordCost(actionId:string,proof:Awaited<ReturnType<GitHubDelivery['publicationCost']>>){this.store.update('actions',actionId,{costPreflight:proof,costEvidence:`Live public GitHub repository; known-free workflows inspected at current default head ${proof.defaultBranchHead}. Exact artifact ${proof.artifactId} (${proof.artifactIdentity}) workflow qualification: reviewed baseline ${proof.workflowQualification.reviewed.kind}; current default ${proof.workflowQualification.currentDefault.kind}. Qualification and public visibility checked immediately before dispatch.`});}
+ private recordCost(actionId:string,proof:Awaited<ReturnType<GitHubDelivery['publicationCost']>>){this.store.update('actions',actionId,{costPreflight:proof,costEvidence:this.store.need('actions',actionId).ownerProposalId?this.store.need('actions',actionId).costEvidence:`Live public GitHub repository; known-free workflows inspected at current default head ${proof.defaultBranchHead}. Exact artifact ${proof.artifactId} (${proof.artifactIdentity}) workflow qualification: reviewed baseline ${proof.workflowQualification.reviewed.kind}; current default ${proof.workflowQualification.currentDefault.kind}. Qualification and public visibility checked immediately before dispatch.`});}
  private adoptPrepared(actor:Actor,action:ExternalAction){
   if(actor.kind!=='employee'||action.runId===actor.runId)return;
   const prior=this.store.need('runs',action.runId);
   if(!prior.tokenRevoked||['running','cancelling','queued'].includes(prior.status))throw new DomainError('prior_run_active','Previous intent owner has not finished; do not dispatch concurrently.',409);
   if(action.status!=='prepared')throw new DomainError('reconciliation_required','Only a never-dispatched or conclusively absent intent can be resumed.',409);
   this.store.validateActor(actor,true);
+  if(action.ownerProposalId)return; // Dispatch validates the exact original assignment; keep frozen origin intact.
   this.store.update('actions',action.id,{runId:actor.runId,employeeId:actor.employeeId,policyRevision:actor.policyRevision,priorRunIds:[...(action.priorRunIds??[]),action.runId]});
   this.store.emit('action.adopted',{actionId:action.id,runId:actor.runId,priorRunId:action.runId});
  }

@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { TelegramTransport, type TelegramApi } from '../src/server/telegram.js';
 import { CompanyStore } from '../src/storage/store.js';
 import { GitHubDelivery, assertFreeWorkflow, assertNoClosingSyntax, qualifyWalkLangReleaseVersion } from '../src/tools/github.js';
 import { CorporateBroker, brokerTools, corporateGuide } from '../src/tools/broker.js';
@@ -113,15 +114,22 @@ describe('external publication boundaries',()=>{
     providerReads(async(file,args)=>file==='gh'&&(args[0]==='pr'||args.some(a=>a.includes('/pulls')))?JSON.stringify([remote]):undefined);
     await delivery.reconcile(intent.id);expect(store.need('actions',intent.id).status).toBe('uncertain');expect(sends).toEqual([]);
   });
-  it('resumes a never-dispatched PR in a new run while preserving the observed push and prior owner',async()=>{
+  it.each([false,true])('resumes a never-dispatched PR with reserved approval %s while preserving the observed push and origin',async reserved=>{
     providerReads(async(file,args)=>{if(file==='git'&&args.includes('push')){store.command(owner,{type:'control',action:'pause'});return '';}return undefined;});
     await expect(delivery.deliver(actor,{productId:project.productId!,artifactId:artifact.id,title:'Fix parser edge case',body:'Actual reviewed compiler correction.'})).rejects.toThrow();
     const former=actor.kind==='employee'?store.need('runs',actor.runId):undefined;if(!former)throw new Error('Fixture run missing');
     store.finishRun(former.id,{status:'interrupted'});store.command(owner,{type:'control',action:'resume'});
+    if(reserved){
+     const api:TelegramApi=async method=>({ok:true,result:method==='sendMessage'?{message_id:42}:[]});const transport=new TelegramTransport(store,{token:'123456:SYNTHETIC_TEST_TOKEN',ownerUserId:123,chatId:123},api);
+     const action=store.list('actions').find(a=>a.kind==='pull_request')!,proposal=store.command(owner,{type:'owner.propose',title:'Resume reviewed publication',content:'Only this retained PR action.',proposalScope:'Create this exact reviewed PR.',actionId:action.id,expiresAt:new Date(Date.now()+3600000).toISOString(),channel:'telegram'});
+     await transport.tick();await transport.tick();
+     const incoming:TelegramApi=async()=>({ok:true,result:[{update_id:1,message:{message_id:9,from:{id:123},chat:{id:123,type:'private'},text:`APPROVE ${proposal.id}`,reply_to_message:{message_id:42}}}]});await new TelegramTransport(store,{token:'123456:SYNTHETIC_TEST_TOKEN',ownerUserId:123,chatId:123},incoming).tick();expect(store.need('attention',proposal.id).disposition?.decision).toBe('approved');
+    }
+
     const next=store.put('runs',{...former,id:undefined,status:'running',tokenRevoked:false,policyRevision:store.policy.revision,sessionId:'resumed-session'});actor={kind:'employee',employeeId:next.employeeId,runId:next.id,policyRevision:next.policyRevision};sends=[];providerReads();
     const result=await delivery.deliver(actor,{productId:project.productId!,artifactId:artifact.id,title:'Fix parser edge case',body:'Actual reviewed compiler correction.'});
     expect(result.prNumber).toBe(1);expect(sends.filter(s=>s.includes('push'))).toHaveLength(0);expect(sends.filter(s=>s.includes('POST'))).toHaveLength(1);
-    const intent=store.list('actions').find(a=>a.kind==='pull_request')!;expect(intent.priorRunIds).toContain(former.id);expect(intent.runId).toBe(next.id);
+    const intent=store.list('actions').find(a=>a.kind==='pull_request')!;if(reserved){expect(intent.runId).toBe(former.id);expect(intent.dispatchRunId).toBe(next.id);}else{expect(intent.priorRunIds).toContain(former.id);expect(intent.runId).toBe(next.id);}
   });
   it('reconciles an interrupted issue creation by its durable marker without creating a duplicate issue',async()=>{
     const input={productId:project.productId!,kind:'issue_create' as const,title:'Observed compiler failure',content:'Actual reproducible user issue.',dedupeKey:'real-observed-issue'};

@@ -1,3 +1,4 @@
+import { createOwnerProposal, assertProposalAction } from '../core/owner-proposals.js';
 import { homedir } from 'node:os';
 import { factoryMandate, migrateCompanyDirection } from '../core/company-direction.js';
 import type { ProviderBackoff } from '../core/provider-backoff.js';
@@ -541,6 +542,7 @@ export class CompanyStore {
         return artifact;
       }
       case 'review.record': return this.review(actor,c);
+      case 'owner.propose': return createOwnerProposal(this,actor,c);
       case 'message.send': {
         if (c.projectId) this.need('projects',c.projectId);
         const recipientId=c.recipientId ?? this.list('employees').find(e=>e.status==='active'&&this.level(e.id)==='ceo')?.id ?? null;
@@ -578,6 +580,7 @@ export class CompanyStore {
       case 'action.approveCost': {
         if (actor.kind!=='owner') throw new DomainError('owner_required','New spending requires explicit Owner approval',403);
         const action=this.need('actions',c.actionId);
+        if(action.ownerProposalId)throw new DomainError('proposal_scope_denied','Use the exact reserved proposal response; cost approval cannot override it.',403);
         if (action.status!=='blocked' || typeof c.amount!=='number' || c.amount<0 || action.cost===null || c.amount<action.cost) throw new DomainError('invalid_approval','Approval requires a prepared concrete action and its stated cost');
         const description=required(c.description,'Approved expenditure');
         const approved=this.update('actions',action.id,{status:'prepared',costApproval:{amount:c.amount,description,approvedAt:NOW(),actionId:action.id}});
@@ -1051,8 +1054,11 @@ export class CompanyStore {
     return this.db.transaction(() => {
       this.validateActor(actor,true);
       const action=this.need('actions',actionId);
-      if (actor.kind!=='employee'||actor.employeeId!==action.employeeId||actor.runId!==action.runId) throw new DomainError('wrong_run','External intent belongs to a different employee run',403);
+      const origin=this.get('runs',action.runId);
+      const continuation=actor.kind==='employee'&&action.ownerProposalId&&origin?.tokenRevoked&&!['running','queued','cancelling'].includes(origin.status)&&this.need('runs',actor.runId).assignmentId===origin.assignmentId;
+      if (actor.kind!=='employee'||actor.employeeId!==action.employeeId||actor.runId!==action.runId&&!continuation) throw new DomainError('wrong_run','External intent belongs to a different employee run or assignment',403);
       if (action.status!=='prepared') throw new DomainError('action_not_dispatchable',`Action is ${action.status}; uncertain/dispatched actions require reconciliation`,409);
+      assertProposalAction(this,action);
       if (action.policyRevision!==this.policy.revision) throw new DomainError('stale_policy','Action must be revalidated under the current policy',403);
       if (action.cost===null || !action.costEvidence || (action.cost>0&&(!action.costApproval||action.costApproval.actionId!==action.id||action.costApproval.amount<action.cost))) throw new DomainError('spending_denied','Unapproved new spending or uncertain charge denied before dispatch',403);
       if (['merge','release','deploy','store_submission'].includes(action.kind)) {
@@ -1060,7 +1066,7 @@ export class CompanyStore {
         if (artifact.identity!==action.artifactIdentity || !this.hasApprovedArtifact(artifact.assignmentId,artifact.identity)) throw new DomainError('review_required','Delivery requires independent review of this exact artifact identity',403);
         if (!action.content.checksPassed || action.content.actualHead!==artifact.identity) throw new DomainError('unchecked_head','Required checks and the actual delivery commit must match the reviewed artifact',403);
       }
-      const dispatched=this.update('actions',action.id,{status:'dispatched',dispatchedAt:NOW()}); this.emit('action.dispatched',{actionId}); return dispatched;
+      const dispatched=this.update('actions',action.id,{status:'dispatched',dispatchedAt:NOW(),dispatchRunId:actor.runId}); this.emit('action.dispatched',{actionId}); return dispatched;
     }).immediate();
   }
   resolveAction(actionId: string, result: {status:'succeeded'|'failed'|'uncertain'; remoteRef?:string; result?:any; [key:string]:any}): ExternalAction {

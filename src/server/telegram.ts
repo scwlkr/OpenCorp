@@ -1,3 +1,4 @@
+import { resolveOwnerProposal, ownerDirectedProposal } from '../core/owner-proposals.js';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -8,7 +9,7 @@ import { queueOwnerConversation } from './owner-conversation.js';
 
 const configSchema=z.object({ownerUserId:z.number().int().positive().safe(),chatId:z.number().int().positive().safe()}).strict();
 export type TelegramConfig=z.infer<typeof configSchema>&{token:string};
-type Update={update_id:number;message?:{message_id:number;from?:{id:number;is_bot?:boolean};chat:{id:number;type:string};text?:string}};
+type Update={update_id:number;message?:{message_id:number;from?:{id:number;is_bot?:boolean};chat:{id:number;type:string};text?:string;reply_to_message?:{message_id:number}}};
 type ApiResult={ok:boolean;result?:any;error_code?:number};
 export type TelegramApi=(method:'getUpdates'|'sendMessage',body:Record<string,unknown>,signal:AbortSignal)=>Promise<ApiResult>;
 const integrationId='owner-telegram';
@@ -78,7 +79,7 @@ export class TelegramTransport{
    for(const update of response.result as Update[])this.accept(update);
    for(const message of this.store.list('messages').filter(m=>m.telegram?.direction==='incoming')){
     if(!this.store.list('assignments').some(a=>a.payload?.messageId===message.id)){
-     try{queueOwnerConversation(this.store,{content:message.content},message.id);}catch(error){if(!(error instanceof DomainError&&error.code==='recipient_unavailable'))throw error;}
+     try{const response=resolveOwnerProposal(this.store,message,message.telegram.parentActionId);queueOwnerConversation(this.store,{content:response?`${message.content}\nVerified proposal response: ${JSON.stringify(response)}. Report this recorded outcome; do not reinterpret it or change permissions.`:message.content},message.id);}catch(error){if(!(error instanceof DomainError&&error.code==='recipient_unavailable'))throw error;}
     }
    }
   }finally{this.active=false;}
@@ -91,7 +92,7 @@ export class TelegramTransport{
    const message=update.message;
    if(message?.from?.id===this.config.ownerUserId&&message.from.is_bot!==true&&message.chat.id===this.config.chatId&&message.chat.type==='private'&&typeof message.text==='string'&&message.text.trim()&&message.text.length<=20000){
     const id=`telegram:${this.binding}:${update.update_id}`;
-    if(!this.store.get('messages',id))this.store.put('messages',{id,senderId:'owner',recipientId:null,projectId:null,content:message.text,runId:null,telegram:{direction:'incoming',updateId:update.update_id,messageId:message.message_id,binding:this.binding}});
+    if(!this.store.get('messages',id))this.store.put('messages',{id,senderId:'owner',recipientId:null,projectId:null,content:message.text,runId:null,telegram:{direction:'incoming',updateId:update.update_id,messageId:message.message_id,binding:this.binding,parentActionId:this.store.list('actions').find(a=>a.kind==='telegram.send'&&a.target===this.binding&&a.remoteRef===String(message.reply_to_message?.message_id))?.id}});
     this.store.emit('telegram.received',{messageId:id});
    }
    this.store.update('integrations',integrationId,{offset:update.update_id+1,detail:'Polling active; verified text messages retained in the shared conversation.'});
@@ -102,14 +103,14 @@ export class TelegramTransport{
   for(const message of this.store.list('messages')){
    if(message.channel==='email'||message.recipientId!=='owner'||message.senderId==='owner'||message.createdAt<integration.enabledAt)continue;
    const run=message.runId?this.store.get('runs',message.runId):undefined;
-   if(!run||run.status!=='succeeded')continue;
+   if((!run||run.status!=='succeeded')&&!ownerDirectedProposal(this.store,message))continue;
    // Plain text, bounded chunks; no Markdown parser or silent truncation.
    const characters=Array.from(`${this.store.get('employees',message.senderId)?.name??message.senderId}: ${message.content}`);
    this.store.db.transaction(()=>{
     for(let offset=0;offset<characters.length;offset+=2000){
      const part=offset/2000,dedupeKey=`telegram:${this.binding}:${message.id}:${part}`;
      if(this.store.list('actions').some(a=>a.dedupeKey===dedupeKey))continue;
-     this.store.put('actions',{employeeId:message.senderId,runId:run.id,productId:'',kind:'telegram.send',target:this.binding,content:{messageId:message.id,part,text:characters.slice(offset,offset+2000).join('')},dedupeKey,status:'prepared',policyRevision:run.policyRevision,cost:0,costEvidence:'Telegram Bot API ordinary message; paid broadcast disabled.'});
+     this.store.put('actions',{employeeId:message.senderId,runId:run?.id??'',productId:'',kind:'telegram.send',target:this.binding,content:{messageId:message.id,part,text:characters.slice(offset,offset+2000).join('')},dedupeKey,status:'prepared',policyRevision:run?.policyRevision??this.store.policy.revision,cost:0,costEvidence:'Telegram Bot API ordinary message; paid broadcast disabled.'});
     }
    })();
   }
