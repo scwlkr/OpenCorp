@@ -1497,3 +1497,12 @@ it('keeps conversation tool aliases bounded while retaining authorized command a
  expect(tools.map(t=>t.name)).toEqual(expect.arrayContaining(['company_detail','company_help','create_assignment','send_message']));
  expect(tools.find(t=>t.name==='company_command')!.inputSchema.properties.command.properties.type.enum).toContain('employee.hire');
 });
+
+it('starts conversation history with newest scoped records and preserves ordinary ordering',async()=>{
+ const actor=actorFor(ceo),assignmentId=store.need('runs',actor.runId).assignmentId;
+ const older=store.put('messages',{senderId:'owner',recipientId:ceo.id,content:'Earlier status',projectId:null}),newer=store.put('messages',{senderId:'owner',recipientId:ceo.id,content:'Current status',projectId:null});
+ const ordinary=await broker.call(actor,'company_read',{collection:'messages',limit:1});expect(ordinary.items[0].id).toBe(older.id);
+ store.update('assignments',assignmentId,{kind:'conversation'});
+ const recent=await broker.call(actor,'company_read',{collection:'messages',limit:1});expect(recent.items[0].id).toBe(newer.id);
+ const next=await broker.call(actor,recent.nextCall.tool,recent.nextCall.arguments);expect(next.items[0].id).toBe(older.id);
+});

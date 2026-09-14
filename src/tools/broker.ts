@@ -469,13 +469,15 @@ Record the next accountable action with company_command {command:{type:"responsi
     else{
      if(!readCollections.includes(args.collection))throw new Error('Unknown collection');
      let records=(state as any)[args.collection] as RecordBase[];
+     const newestFirst=actor.kind==='employee'&&this.context(actor).assignment.kind==='conversation';
+     if(newestFirst)records=[...records].reverse();
      if(args.query!==undefined){const query=args.query.trim().toLowerCase();records=records.filter(record=>String(record.name??'').toLowerCase().includes(query)||String(state.positions.find(position=>position.id===record.positionId)?.title??'').toLowerCase().includes(query));}
      if(args.kind!==undefined)records=records.filter(record=>record.kind===args.kind);
      if(args.channelId!==undefined){const visible=state.experiences.some(record=>record.kind==='workplace.channel'&&record.id===args.channelId);records=visible?records.filter(record=>record.channelId===args.channelId&&record.recipientId==null&&record.projectId==null):[];}
      const currentId=args.collection==='assignments'&&actor.kind==='employee'?state.runs.find(run=>run.id===actor.runId)?.assignmentId:undefined;
      const current=currentId?records.find(record=>record.id===currentId):undefined;
      if(current)records=[current,...records.filter(record=>record.id!==currentId)];
-     result={...(args.collection==='models'?{modelRouting:this.modelRoutingGuidance(state)}:{}),paginationGuidance:'Collection pages return at most 30 records and may be smaller to fit the response budget. Follow nextCall for remaining records; use company_detail with a known record ID.',requestedLimit:Number(args.limit)||15,returned:0,nextCall:null,...(args.collection==='assignments'?{ordering:current?'Current authorized assignment first; remaining records retain stored order.':'Stored order.'}:{}),...page(records)};
+     result={...(args.collection==='models'?{modelRouting:this.modelRoutingGuidance(state)}:{}),paginationGuidance:'Collection pages return at most 30 records and may be smaller to fit the response budget. Follow nextCall for remaining records; use company_detail with a known record ID.',requestedLimit:Number(args.limit)||15,returned:0,nextCall:null,...((args.collection==='assignments'||newestFirst)?{ordering:current?(newestFirst?'Current authorized assignment first; newest remaining records first.':'Current authorized assignment first; remaining records retain stored order.'):(newestFirst?'Newest records first.':'Stored order.')}:{} ),...page(records)};
      // Include guidance in the same budget, and derive continuation only from the final fitted page.
      do{
       fitReadPages(result);
