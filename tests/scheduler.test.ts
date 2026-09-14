@@ -154,15 +154,17 @@ describe('durable dispatch boundaries',()=>{
   });
 
   it.each([
-    ['Acknowledge this controls check only.','Acknowledged.'],
-    ['Explain which artifacts support the current project result.','No artifacts have been recorded in this fixture; there is no completed product outcome to report.'],
-  ])('guides and persists an internal Owner final reply for %s',async(content,text)=>{
+    {content:'Acknowledge this controls check only.',text:'Acknowledged.',sizeClass:'large',contextTokens:32768},
+    {content:'Explain which artifacts support the current project result.',text:'No artifacts have been recorded in this fixture; there is no completed product outcome to report.',sizeClass:'large',contextTokens:32768},
+    {content:'Acknowledge this tiny-model check only.',text:'Acknowledged.',sizeClass:'micro',contextTokens:16384},
+  ])('guides and persists an internal Owner final reply for $content',async({content,text,sizeClass,contextTokens})=>{
+    store.update('models',store.list('models').find(m=>m.id===run.modelId||m.name===run.modelId)!.id,{sizeClass});
     const message=store.command(owner,{type:'message.send',recipientId:run.employeeId,content,wake:false});
     store.update('assignments',assignment.id,{kind:'conversation',status:'running',instructions:`Owner message ${message.id}: ${content}\nRespond through message.send with recipientId omitted (CEO) or in your final answer.`,payload:{messageId:message.id}});
     const result:RuntimeResult={sessionId:'session',text,modelId:'qwen-main',artifactIdentity:'fixture-local-model',usage:{inputTokens:20,outputTokens:10,requests:1,durationMs:10},messagesPath:join(root,'fixture-messages.json'),diagnosticsPath:join(root,'fixture-diagnostics.json'),completion:{finishReason:'stop',continuations:0,outputLimit:4096,exhausted:false}};
     const execute=vi.fn(async(_request:any)=>result),broker=new CorporateBroker(store,root),call=vi.spyOn(broker,'call'),scheduler=new Scheduler(store,{execute} as unknown as LocalRuntime,broker,'http://localhost');
     await (scheduler as any).execute(store.need('runs',run.id));
-    expect(execute.mock.calls[0][0].contextTokens).toBe(16384);
+    expect(execute.mock.calls[0][0].contextTokens).toBe(contextTokens);
     expect(execute.mock.calls[0][0].corporateOnly).toBe(true);
     expect(execute.mock.calls[0][0].system.length).toBeLessThan(5000);
     expect(execute.mock.calls[0][0].prompt).not.toContain('Selected knowledge');
