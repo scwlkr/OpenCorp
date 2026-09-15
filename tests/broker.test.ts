@@ -37,6 +37,11 @@ function actorFor(employee:Employee,project?:Project):Extract<Actor,{kind:'emplo
 }
 
 describe('typed management tools',()=>{
+ it('does not direct management work into implementation completion requirements',async()=>{
+  const actor=actorFor(ceo),original=store.need('assignments',store.need('runs',actor.runId).assignmentId);
+  await expect(broker.call(actor,'finish_assignment',{assignmentId:original.id,artifactId:'unused-artifact',rationale:'Management result'})).rejects.toMatchObject({code:'implementation_required'});
+  expect(store.need('assignments',original.id)).toEqual(original);
+ });
  it('keeps acceptance followup bookkeeping and independent delegation with a smaller tool scope',async()=>{
   const project=store.command(owner,{type:'project.create',name:'Retained implementation',outcome:'Reviewed artifact',acceptance:['Actual result'],supervisorId:ceo.id,rationale:'Acceptance followup fixture'});
   const source=actorFor(ceo,project),original=store.need('assignments',store.need('runs',source.runId).assignmentId),actor=actorFor(ceo),taskId=store.need('runs',actor.runId).assignmentId;
