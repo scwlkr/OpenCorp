@@ -905,6 +905,33 @@ it('keeps current assignment state and newest-run checks outside the synchronous
  store.update('assignments',assignment.id,{status:'queued'});(scheduler as any).diagnoseFailure(store.need('runs',run.id),new Map([[assignment.id,store.need('runs',run.id)]]));expect(enqueue).not.toHaveBeenCalled();
 });
 
+it.each(['completed','cancelled'] as const)('retires retained fault work after its original is %s without losing evidence',status=>{
+ store.update('runs',run.id,{status:'failed'});store.update('assignments',assignment.id,{status:'blocked'});
+ const scheduler=new Scheduler(store,{} as LocalRuntime,{} as CorporateBroker,'http://localhost');
+ (scheduler as any).reconcileOrganization();const diagnosis=store.assignmentBySchedulerKey(`fault:${run.id}`)!;
+ store.update('assignments',assignment.id,{status});(scheduler as any).reconcileOrganization();
+ expect(store.need('assignments',diagnosis.id)).toMatchObject({status:'cancelled',acceptance:diagnosis.acceptance,payload:diagnosis.payload});
+ expect(store.need('assignments',assignment.id).status).toBe(status);expect(store.need('runs',run.id).status).toBe('failed');
+});
+
+it('holds active obsolete recovery until runtime and dispatched effects are reconciled',()=>{
+ store.update('runs',run.id,{status:'failed'});store.update('assignments',assignment.id,{status:'blocked'});
+ const scheduler=new Scheduler(store,{} as LocalRuntime,{} as CorporateBroker,'http://localhost');
+ (scheduler as any).reconcileOrganization();const diagnosis=store.assignmentBySchedulerKey(`fault:${run.id}`)!;
+ const recovery=store.claimNext({assignmentId:diagnosis.id,workspace:root})!;
+ store.update('assignments',assignment.id,{status:'completed'});
+ (scheduler as any).reconcileOrganization();
+ expect(store.need('assignments',diagnosis.id)).toMatchObject({status:'running',paused:true});
+ expect(store.need('runs',recovery.id)).toMatchObject({status:'cancelling',tokenRevoked:true});
+ store.finishRun(recovery.id,{status:'interrupted'});
+ const effect=store.put('actions',{id:'retained-effect',runId:recovery.id,status:'uncertain'});
+ (scheduler as any).reconcileOrganization();expect(store.need('assignments',diagnosis.id).status).toBe('queued');
+ expect(store.need('actions',effect.id).status).toBe('uncertain');
+ store.update('actions',effect.id,{status:'succeeded'});(scheduler as any).reconcileOrganization();
+ expect(store.need('assignments',diagnosis.id).status).toBe('cancelled');
+ expect(store.need('runs',recovery.id).status).toBe('interrupted');
+});
+
 it('queries exact scheduler keys with original first-match ordering and current mutations',()=>{
  const key="key:literal'quoted",createdAt='2026-01-01T00:00:00.000Z';const first=store.put('assignments',{...assignment,id:'key-first',schedulerKey:key,createdAt}),second=store.put('assignments',{...assignment,id:'key-second',schedulerKey:key,createdAt});
  expect(store.assignmentBySchedulerKey(key)?.id).toBe(first.id);expect(store.assignmentBySchedulerKey('missing')).toBeUndefined();

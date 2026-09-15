@@ -179,6 +179,19 @@ export class Scheduler {
   this.store.reconcileReviewScopes();
   this.reconcileReviewScopeCorrections();
   this.store.reconcileAssignmentCompletions();
+  // Retained failure evidence can outlive the work it diagnosed. Stop obsolete
+  // recovery through the existing cancellation path, preserving uncertain effects.
+  for(const diagnosis of this.store.list('assignments').filter(item=>['queued','running','blocked'].includes(item.status)&&item.schedulerKey===`fault:${item.payload?.failedRunId}`)){
+   const original=this.store.get('assignments',diagnosis.payload?.failedAssignmentId);
+   if(!original||!['completed','cancelled'].includes(original.status))continue;
+   const rationale=`Failure diagnosis superseded: original ${original.id} is ${original.status}.`;
+   const runs=this.store.list('runs').filter(run=>run.assignmentId===diagnosis.id);
+   if(runs.some(run=>['queued','running','cancelling','uncertain'].includes(run.status))||this.store.pendingAssignmentEffects(diagnosis.id).length){
+    if(!diagnosis.paused)this.store.command({kind:'owner'},{type:'assignment.update',assignmentId:diagnosis.id,paused:true,rationale});
+    continue;
+   }
+   this.store.command({kind:'owner'},{type:'assignment.update',assignmentId:diagnosis.id,status:'cancelled',blockedReason:rationale,rationale});
+  }
   this.reconcileAcceptance();
   this.diagnoseDependencyWaits();
   // This synchronous diagnosis loop changes assignments, not runs; retain list order's newest run once.
