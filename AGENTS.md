@@ -79,3 +79,12 @@ Use the five default canonical triage labels. See `docs/agents/triage-labels.md`
 ### Domain docs
 
 Single-context: root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.
+
+## Linear work queue
+
+- Team: **WLKR LABS**.
+- Project: [OpenCorp](https://linear.app/wlkr-labs/project/opencorp-69009ff28d59).
+- Linear is the task source of truth. Existing GitHub issues and Markdown plans are historical context; this section supersedes older tracker or backlog guidance.
+- Before starting substantive work, read the Linear issue and discussion and check for existing work. Find or create a Linear issue for substantive user-requested work, not every question or minor action.
+- Keep status current, include the issue ID in branches and PRs, and post concise outcomes or blockers. Mark Done only when completion criteria are met.
+- Do not maintain a competing Markdown backlog or import or sync GitHub issues.
