@@ -2,6 +2,8 @@
 
 ## Read first
 
+**September 24, 2026 Owner hold:** OpenCorp is dormant until the Owner explicitly authorizes reactivation. Do not start or deploy its runtime, agents, scheduled work, or owner-email relay. Do not re-enable the macOS LaunchAgent, Cloudflare email rule, or Worker URLs. Read-only inspection and preservation of existing assets are allowed. [WLK-9](https://linear.app/wlkr-labs/issue/WLK-9/pause-opencorp-runtime-and-disconnect-owner-email-relay) records the shutdown. This hold supersedes older instructions to continue work.
+
 [COMPANY.md](COMPANY.md) is the Owner-approved operating charter. [Implementation specification](https://github.com/scwlkr/OpenCorp/issues/1) is the complete implementation plan. Read [CONTEXT.md](CONTEXT.md) and relevant [ADRs](docs/adr/) before changing the model. These replace the former constitutions, organization chart and expansion plans.
 
 ## Mission and organization
